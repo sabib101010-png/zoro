@@ -36,19 +36,6 @@ CATEGORIES = [
     ("PC_LAPTOP", "💻 PC/Laptop"),
 ]
 
-# কাস্টম প্রাইস স্ল্যাব (সাইট প্রাইস -> ব্র্যান্ড প্রাইস)
-PRICE_SLABS = [
-    (25.0, 20.0),
-    (30.0, 25.0),
-    (50.0, 40.0),
-    (70.0, 60.0),
-    (100.0, 80.0),
-    (160.0, 140.0),
-    (200.0, 180.0),
-    (500.0, 450.0),
-    (800.0, 740.0),
-]
-
 REMOVED_PRODUCTS = [
     "Br Mod Apk Mod",
     "ANGRY MOOD",
@@ -90,6 +77,14 @@ def is_dolphin_product(pname: str) -> bool:
   return "dolphin" in (pname or "").strip().lower()
 
 
+def is_thirty_days_plan(duration: str) -> bool:
+  s = (duration or "").strip().lower()
+  m = re.search(r"(\d+)\s*day", s)
+  if not m:
+    return False
+  return int(m.group(1)) >= 30
+
+
 def is_three_days_or_more(duration: str) -> bool:
   s = (duration or "").strip().lower()
   if "hour" in s or "hr" in s:
@@ -100,7 +95,13 @@ def is_three_days_or_more(duration: str) -> bool:
   return int(m.group(1)) >= 3
 
 
-def calc_brand_price(site_price: float, pname: str = "") -> float:
+def calc_brand_price(
+    site_price: float, pname: str = "", duration: str = ""
+) -> float:
+  """
+    - Dolphin প্যানেলে দাম অপরিবর্তিত থাকে
+    - সাধারণ প্ল্যানগুলোতে শেষ অঙ্ক ০ বা ৫ হয় এবং ওয়েবসাইটের দামের চেয়ে কম থাকে
+    """
   sp = float(site_price)
   if sp <= 0:
     return 0.0
@@ -108,69 +109,116 @@ def calc_brand_price(site_price: float, pname: str = "") -> float:
   if is_dolphin_product(pname):
     return round_to_0_or_5(sp)
 
-  if sp <= PRICE_SLABS[0][0]:
-    ratio = PRICE_SLABS[0][1] / PRICE_SLABS[0][0]
-    raw = sp * ratio
-  elif sp >= PRICE_SLABS[-1][0]:
-    raw = sp * 0.90
+  if is_thirty_days_plan(duration):
+    if abs(sp - 700.0) < 1e-6:
+      prev_base = 670.0
+    else:
+      raw_cut = min(50.0, sp * 0.05)
+      cut_amt = round_to_0_or_5(max(25.0, raw_cut))
+      prev_base = round_to_0_or_5(max(sp - cut_amt, sp * 0.72))
   else:
-    raw = sp * 0.85
-    for i in range(len(PRICE_SLABS) - 1):
-      x1, y1 = PRICE_SLABS[i]
-      x2, y2 = PRICE_SLABS[i + 1]
-      if x1 <= sp <= x2:
-        if x2 == x1:
-          raw = y1
-        else:
-          t = (sp - x1) / (x2 - x1)
-          raw = y1 + t * (y2 - y1)
-        break
+    if sp <= 30:
+      raw_cut = 5.0
+    elif sp <= 70:
+      raw_cut = 10.0
+    elif sp <= 150:
+      raw_cut = 15.0
+    elif sp <= 300:
+      raw_cut = 20.0
+    else:
+      raw_cut = 25.0
+    cut_amt = min(25.0, round_to_0_or_5(raw_cut))
+    prev_base = round_to_0_or_5(max(sp - cut_amt, sp * 0.72))
 
-  # কেনা দাম বিক্রয়মূল্যের চেয়ে ~30% কম (0.70x) ধরে নিরাপদ ফ্লোর
-  cost_est = sp * 0.70
-  min_safe_price = cost_est * 1.12
-  return round_to_0_or_5(max(raw, min_safe_price))
+  boosted = round_to_0_or_5(prev_base * 1.14)
+  max_allowed_below_site = round_to_0_or_5(sp - 5.0)
+  if max_allowed_below_site < 5.0:
+    max_allowed_below_site = 5.0
+
+  final_p = min(boosted, max_allowed_below_site)
+  return round_to_0_or_5(final_p)
 
 
-def calc_discount_details(
-    pname: str, duration: str, base_price: float, user_disc_pct: float
+def get_vip_discount_pct(total_spent: float) -> float:
+  """
+    - মোট এপ্রুভড কেনাকাটা >= ৳5,000 হলে 30% ছাড়
+    - মোট এপ্রুভড কেনাকাটা >= ৳2,000 হলে 20% ছাড়
+    - এর নিচে 0%
+    """
+  spent = float(total_spent or 0.0)
+  if spent >= 5000.0:
+    return 30.0
+  if spent >= 2000.0:
+    return 20.0
+  return 0.0
+
+
+def calc_vip_price_details(
+    pname: str, base_price: float, total_spent: float
 ) -> tuple[float, float, float]:
   """
     রিটার্ন করে: (applied_pct, discount_amount, final_price)
-    - Dolphin প্যানেলে ডিসকাউন্ট 0%
-    - 3 দিনের নিচের প্ল্যানে ডিসকাউন্ট 0%
-    - প্রতি রেফারে 2% জমে; সাধারণ প্রোডাক্টে সর্বোচ্চ 5%, আর 600 টাকার ওপরে সর্বোচ্চ 30%
-    - কেনা দাম (প্রায় 70% of base_price) ও ন্যূনতম লাভের নিচে দাম নামতে দেবে না
+    - Dolphin প্যানেলে VIP ডিসকাউন্ট 0%
+    - ডিসকাউন্টের পর দাম ৫-এর গুণিতকে (শেষে ০ বা ৫) রাউন্ড হয়
     """
-  price = float(base_price)
-  if price <= 0 or is_dolphin_product(pname) or not is_three_days_or_more(duration):
-    return 0.0, 0.0, round_to_0_or_5(price)
+  price = round_to_0_or_5(float(base_price))
+  if price <= 0 or is_dolphin_product(pname):
+    return 0.0, 0.0, price
 
-  avail_pct = max(0.0, float(user_disc_pct or 0.0))
-  if avail_pct <= 0:
-    return 0.0, 0.0, round_to_0_or_5(price)
+  pct = get_vip_discount_pct(total_spent)
+  if pct <= 0:
+    return 0.0, 0.0, price
 
-  max_cap_pct = 30.0 if price > 600.0 else 5.0
-  applied_pct = min(avail_pct, max_cap_pct)
+  raw_after = price * (1.0 - (pct / 100.0))
+  final_price = round_to_0_or_5(raw_after)
+  if final_price >= price:
+    return 0.0, 0.0, price
 
-  raw_after = price * (1.0 - (applied_pct / 100.0))
-  # কেনা দাম (~0.70x) + ন্যূনতম 30% কস্ট-মার্জিন সুরক্ষা যেন ডিসকাউন্টে লস না হয়
-  cost_floor = price * 0.70
-  profit_guard = cost_floor * 1.30
-  safe_floor = max(cost_floor, profit_guard)
+  disc_amt = round(price - final_price, 2)
+  return pct, disc_amt, final_price
 
-  if raw_after < safe_floor:
-    max_safe_disc_amt = max(0.0, price - safe_floor)
-    applied_pct = round((max_safe_disc_amt / price) * 100.0, 2)
-    final_price = round_to_0_or_5(safe_floor)
-  else:
-    final_price = round_to_0_or_5(raw_after)
 
-  disc_amt = max(0.0, round(price - final_price, 2))
-  if disc_amt <= 0 or applied_pct <= 0:
-    return 0.0, 0.0, round_to_0_or_5(price)
+def calc_discount_details(
+    pname: str,
+    duration: str,
+    base_price: float,
+    user_disc_pct: float,
+    total_spent: float = 0.0,
+) -> tuple[float, float, float]:
+  """
+    VIP স্পেন্ডিং ডিসকাউন্ট ও রেফার/ইউজার ডিসকাউন্টের মধ্যে সর্বোচ্চ কার্যকর ডিসকাউন্ট হিসাব করে।
+    """
+  price = round_to_0_or_5(float(base_price))
+  if price <= 0 or is_dolphin_product(pname):
+    return 0.0, 0.0, price
 
-  return applied_pct, disc_amt, final_price
+  vip_pct, vip_amt, vip_final = calc_vip_price_details(pname, price, total_spent)
+
+  ref_pct = 0.0
+  ref_amt = 0.0
+  ref_final = price
+  if is_three_days_or_more(duration) and float(user_disc_pct or 0.0) > 0:
+    avail_pct = float(user_disc_pct)
+    max_cap_pct = 30.0 if price > 600.0 else 5.0
+    applied_pct = min(avail_pct, max_cap_pct)
+    raw_after = price * (1.0 - (applied_pct / 100.0))
+    cost_floor = price * 0.70
+    profit_guard = cost_floor * 1.30
+    safe_floor = max(cost_floor, profit_guard)
+    if raw_after < safe_floor:
+      max_safe_disc_amt = max(0.0, price - safe_floor)
+      applied_pct = round((max_safe_disc_amt / price) * 100.0, 2)
+      ref_final = round_to_0_or_5(safe_floor)
+    else:
+      ref_final = round_to_0_or_5(raw_after)
+    ref_amt = max(0.0, round(price - ref_final, 2))
+    ref_pct = applied_pct if ref_amt > 0 else 0.0
+
+  if vip_amt >= ref_amt and vip_amt > 0:
+    return vip_pct, vip_amt, vip_final
+  if ref_amt > 0:
+    return ref_pct, ref_amt, ref_final
+  return 0.0, 0.0, price
 
 
 # (product_name, category_key, [(duration, price_or_site_price, stock, bonus, is_fixed_official), ...])
@@ -266,7 +314,7 @@ CATALOG_PRODUCTS = [
                 canon_duration(dur),
                 round_to_0_or_5(pr)
                 if fixed_off
-                else calc_brand_price(pr, pname),
+                else calc_brand_price(pr, pname, canon_duration(dur)),
                 stk,
                 bon,
             )
@@ -360,7 +408,10 @@ def is_duplicate_proof(proof_val: str) -> bool:
 
 def sync_catalog_prices(cur: sqlite3.Cursor):
   removed_canon = {canon_name(x) for x in REMOVED_PRODUCTS}
-  catalog_map = {canon_name(pname): (pname, cat_key, plist) for pname, cat_key, plist in CATALOG_PRODUCTS}
+  catalog_map = {
+      canon_name(pname): (pname, cat_key, plist)
+      for pname, cat_key, plist in CATALOG_PRODUCTS
+  }
 
   cur.execute("SELECT id, name, category FROM products ORDER BY id")
   all_prods = cur.fetchall()
@@ -385,7 +436,12 @@ def sync_catalog_prices(cur: sqlite3.Cursor):
           )
       else:
         primary_pid = kept_by_canon[cname]
-        cur.execute("UPDATE orders SET plan_id = (SELECT id FROM plans WHERE product_id = ? LIMIT 1) WHERE plan_id IN (SELECT id FROM plans WHERE product_id = ?)", (primary_pid, pid))
+        cur.execute(
+            "UPDATE orders SET plan_id = (SELECT id FROM plans WHERE product_id"
+            " = ? LIMIT 1) WHERE plan_id IN (SELECT id FROM plans WHERE"
+            " product_id = ?)",
+            (primary_pid, pid),
+        )
         cur.execute("DELETE FROM plans WHERE product_id = ?", (pid,))
         cur.execute("DELETE FROM products WHERE id = ?", (pid,))
 
@@ -401,7 +457,10 @@ def sync_catalog_prices(cur: sqlite3.Cursor):
       pid = kept_by_canon[cname]
 
     allowed_durs = [canon_duration(dur) for dur, _, _, _ in plist]
-    cur.execute("SELECT id, duration, bonus FROM plans WHERE product_id = ? ORDER BY id", (pid,))
+    cur.execute(
+        "SELECT id, duration, bonus FROM plans WHERE product_id = ? ORDER BY id",
+        (pid,),
+    )
     existing_plans = cur.fetchall()
 
     seen_durs = set()
@@ -412,12 +471,15 @@ def sync_catalog_prices(cur: sqlite3.Cursor):
       else:
         seen_durs.add(cdur)
         if pl["duration"] != cdur:
-          cur.execute("UPDATE plans SET duration = ? WHERE id = ?", (cdur, pl["id"]))
+          cur.execute(
+              "UPDATE plans SET duration = ? WHERE id = ?", (cdur, pl["id"])
+          )
 
     for dur, pr, st, bon in plist:
       cdur = canon_duration(dur)
       cur.execute(
-          "SELECT id FROM plans WHERE product_id = ? AND duration = ? ORDER BY id LIMIT 1",
+          "SELECT id FROM plans WHERE product_id = ? AND duration = ? ORDER BY"
+          " id LIMIT 1",
           (pid, cdur),
       )
       pl_row = cur.fetchone()
@@ -445,6 +507,7 @@ def init_db():
             username TEXT DEFAULT '',
             lang TEXT DEFAULT 'bn',
             balance REAL DEFAULT 0.0,
+            total_spent REAL DEFAULT 0.0,
             discount_pct REAL DEFAULT 0.0,
             referral_count INTEGER DEFAULT 0,
             referred_by INTEGER DEFAULT 0,
@@ -494,6 +557,8 @@ def init_db():
 
   cur.execute("PRAGMA table_info(users)")
   u_cols = [c["name"] for c in cur.fetchall()]
+  if "total_spent" not in u_cols:
+    cur.execute("ALTER TABLE users ADD COLUMN total_spent REAL DEFAULT 0.0")
   if "discount_pct" not in u_cols:
     cur.execute("ALTER TABLE users ADD COLUMN discount_pct REAL DEFAULT 0.0")
   if "referral_count" not in u_cols:
@@ -523,6 +588,16 @@ def init_db():
         "INSERT INTO payment_settings (id, bkash, nagad) VALUES (1, ?, ?)",
         (DEFAULT_BKASH, DEFAULT_NAGAD),
     )
+
+  cur.execute("""
+        UPDATE users
+        SET total_spent = COALESCE((
+            SELECT SUM(COALESCE(NULLIF(o.final_amount, 0), pl.price))
+            FROM orders o
+            JOIN plans pl ON o.plan_id = pl.id
+            WHERE o.user_id = users.user_id AND o.status = 'approved'
+        ), 0.0)
+        """)
 
   sync_catalog_prices(cur)
 
@@ -563,7 +638,8 @@ def register_or_update_user(message: Message, referrer_id: int = 0):
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
-      "SELECT lang, discount_pct, referral_count FROM users WHERE user_id = ?",
+      "SELECT lang, total_spent, discount_pct, referral_count FROM users WHERE"
+      " user_id = ?",
       (uid,),
   )
   existing = cur.fetchone()
@@ -581,14 +657,13 @@ def register_or_update_user(message: Message, referrer_id: int = 0):
         """
             INSERT INTO users (
                 user_id, full_name, username, lang, balance,
-                discount_pct, referral_count, referred_by, joined_at
+                total_spent, discount_pct, referral_count, referred_by, joined_at
             )
-            VALUES (?, ?, ?, 'bn', 0.0, 0.0, 0, ?, ?)
+            VALUES (?, ?, ?, 'bn', 0.0, 0.0, 0.0, 0, ?, ?)
             """,
         (uid, full_name, username, valid_ref, joined),
     )
     if valid_ref:
-      # প্রতি বৈধ রেফারে 2% ডিসকাউন্ট যোগ (ম্যাক্স 30% পর্যন্ত জমতে পারবে)
       cur.execute(
           """
                 UPDATE users
@@ -601,10 +676,12 @@ def register_or_update_user(message: Message, referrer_id: int = 0):
       ref_awarded_to = valid_ref
 
     lang = "bn"
+    total_spent = 0.0
     disc_pct = 0.0
     ref_cnt = 0
   else:
     lang = existing["lang"] or "bn"
+    total_spent = float(existing["total_spent"] or 0.0)
     disc_pct = float(existing["discount_pct"] or 0.0)
     ref_cnt = int(existing["referral_count"] or 0)
     cur.execute(
@@ -623,6 +700,7 @@ def register_or_update_user(message: Message, referrer_id: int = 0):
   return (
       is_new,
       lang,
+      total_spent,
       disc_pct,
       ref_cnt,
       total_users,
@@ -638,8 +716,11 @@ def set_lang(user_id: int, lang: str):
   cur = conn.cursor()
   cur.execute(
       """
-        INSERT INTO users (user_id, full_name, username, lang, balance, discount_pct, referral_count, referred_by, joined_at)
-        VALUES (?, 'User', 'N/A', ?, 0.0, 0.0, 0, 0, ?)
+        INSERT INTO users (
+            user_id, full_name, username, lang, balance,
+            total_spent, discount_pct, referral_count, referred_by, joined_at
+        )
+        VALUES (?, 'User', 'N/A', ?, 0.0, 0.0, 0.0, 0, 0, ?)
         ON CONFLICT(user_id) DO UPDATE SET lang = excluded.lang
         """,
       (user_id, lang, now_str()),
@@ -652,20 +733,48 @@ def get_user_info(user_id: int):
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
-      "SELECT full_name, username, lang, discount_pct, referral_count FROM"
-      " users WHERE user_id = ?",
+      "SELECT full_name, username, lang, total_spent, discount_pct,"
+      " referral_count FROM users WHERE user_id = ?",
       (user_id,),
   )
   row = cur.fetchone()
   conn.close()
   if not row:
-    return "User", "N/A", "bn", 0.0, 0
+    return "User", "N/A", "bn", 0.0, 0.0, 0
   return (
       row["full_name"] or "User",
       row["username"] or "N/A",
       row["lang"] or "bn",
+      float(row["total_spent"] or 0.0),
       float(row["discount_pct"] or 0.0),
       int(row["referral_count"] or 0),
+  )
+
+
+def build_welcome_message(full_name: str, lang: str, total_spent: float) -> str:
+  vip_pct = get_vip_discount_pct(total_spent)
+  if lang == "bn":
+    return (
+        f"👋 স্বাগতম, {full_name}!\n"
+        f"✨ ZORO 404 OFFICIAL বটে আপনাকে স্বাগতম।\n\n"
+        f"💎 আপনার বর্তমান স্ট্যাটাস:\n"
+        f"• মোট কেনাকাটা: ৳{total_spent:.0f}\n"
+        f"• বর্তমান VIP ডিসকাউন্ট: {vip_pct:.0f}%\n\n"
+        f"👑 VIP ডিসকাউন্ট অফার:\n"
+        f"• মোট ৳2,000 কেনাকাটা করলে পরের সব অর্ডারে 20% ছাড়!\n"
+        f"• মোট ৳5,000 কেনাকাটা করলে পরের সব অর্ডারে 30% ছাড়!\n\n"
+        f"🛒 কি কিনুন বাটনে চাপ দিয়ে এখনই আপনার পছন্দের প্ল্যান বেছে নিন।"
+    )
+  return (
+      f"👋 Welcome, {full_name}!\n"
+      f"✨ Welcome to ZORO 404 OFFICIAL.\n\n"
+      f"💎 Your Current Status:\n"
+      f"• Total Approved Spent: ৳{total_spent:.0f}\n"
+      f"• Active VIP Discount: {vip_pct:.0f}%\n\n"
+      f"👑 VIP Discount Tiers:\n"
+      f"• Spend ৳2,000+ total to unlock 20% off future orders!\n"
+      f"• Spend ৳5,000+ total to unlock 30% off future orders!\n\n"
+      f"🛒 Tap Buy Keys to browse categories and order."
   )
 
 
@@ -723,14 +832,17 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
     rows = [
         [
             KeyboardButton(text="🛒 Buy Keys"),
+            KeyboardButton(text="👑 VIP Discount"),
+        ],
+        [
             KeyboardButton(text="🎁 My Discount"),
-        ],
-        [
             KeyboardButton(text="🔗 Refer & Earn"),
-            KeyboardButton(text="📦 My Orders"),
         ],
         [
+            KeyboardButton(text="📦 My Orders"),
             KeyboardButton(text="🌐 Change Language"),
+        ],
+        [
             KeyboardButton(text="📞 Support"),
         ],
     ]
@@ -738,14 +850,17 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
     rows = [
         [
             KeyboardButton(text="🛒 কি কিনুন"),
+            KeyboardButton(text="👑 VIP ডিসকাউন্ট"),
+        ],
+        [
             KeyboardButton(text="🎁 মাই ডিসকাউন্ট"),
-        ],
-        [
             KeyboardButton(text="🔗 রেফার লিংক"),
-            KeyboardButton(text="📦 আমার অর্ডার"),
         ],
         [
+            KeyboardButton(text="📦 আমার অর্ডার"),
             KeyboardButton(text="🌐 ভাষা পরিবর্তন"),
+        ],
+        [
             KeyboardButton(text="📞 সাপোর্ট"),
         ],
     ]
@@ -858,6 +973,7 @@ async def cmd_start(message: Message):
   (
       is_new,
       lang,
+      total_spent,
       disc_pct,
       ref_cnt,
       total_users,
@@ -896,13 +1012,7 @@ async def cmd_start(message: Message):
       "ভাষা বেছে নিন / Choose your language:",
       reply_markup=lang_kb(),
   )
-  welcome_txt = (
-      f"ZORO 404 OFFICIAL\n"
-      f"🎁 জমে থাকা ডিসকাউন্ট: {disc_pct:.0f}% | রেফার: {ref_cnt}"
-      if lang == "bn"
-      else f"ZORO 404 OFFICIAL\n"
-      f"🎁 Saved Discount: {disc_pct:.0f}% | Referrals: {ref_cnt}"
-  )
+  welcome_txt = build_welcome_message(full_name, lang, total_spent)
   await message.answer(welcome_txt, reply_markup=main_menu(uid, lang))
 
 
@@ -910,53 +1020,95 @@ async def cmd_start(message: Message):
 async def cb_setlang(callback: CallbackQuery):
   lang = callback.data.split("_", 1)[1]
   set_lang(callback.from_user.id, lang)
-  _, _, _, disc_pct, ref_cnt = get_user_info(callback.from_user.id)
+  full_name, _, _, total_spent, _, _ = get_user_info(callback.from_user.id)
   await callback.message.edit_text(
       "✅ বাংলা সেট করা হয়েছে।" if lang == "bn" else "✅ English set."
   )
+  welcome_txt = build_welcome_message(full_name, lang, total_spent)
   await callback.message.answer(
-      f"মেইন মেনু | 🎁 ডিসকাউন্ট: {disc_pct:.0f}% (রেফার: {ref_cnt})"
-      if lang == "bn"
-      else f"Main Menu | 🎁 Discount: {disc_pct:.0f}% (Refs: {ref_cnt})",
+      welcome_txt,
       reply_markup=main_menu(callback.from_user.id, lang),
   )
   await callback.answer()
 
 
+@dp.message(F.text.in_(["👑 VIP ডিসকাউন্ট", "👑 VIP Discount"]))
+async def btn_vip_discount(message: Message):
+  admin_states.pop(message.from_user.id, None)
+  full_name, username, lang, total_spent, _, _ = get_user_info(
+      message.from_user.id
+  )
+  vip_pct = get_vip_discount_pct(total_spent)
+
+  if total_spent < 2000.0:
+    need_2k = 2000.0 - total_spent
+    next_info_bn = f"আর ৳{need_2k:.0f} কেনাকাটা করলে 20% VIP ছাড় চালু হবে!"
+    next_info_en = f"Spend ৳{need_2k:.0f} more to unlock 20% VIP discount!"
+  elif total_spent < 5000.0:
+    need_5k = 5000.0 - total_spent
+    next_info_bn = f"আর ৳{need_5k:.0f} কেনাকাটা করলে 30% VIP ছাড় চালু হবে!"
+    next_info_en = f"Spend ৳{need_5k:.0f} more to unlock 30% VIP discount!"
+  else:
+    next_info_bn = "আপনি সর্বোচ্চ 30% VIP লেভেলে আছেন!"
+    next_info_en = "You have unlocked the maximum 30% VIP tier!"
+
+  if lang == "bn":
+    txt = (
+        f"👑 VIP স্পেন্ডিং ডিসকাউন্ট\n\n"
+        f"• ইউজার: {full_name} ({username})\n"
+        f"• মোট এপ্রুভড কেনাকাটা: ৳{total_spent:.0f}\n"
+        f"• বর্তমান ডিসকাউন্ট: {vip_pct:.0f}%\n"
+        f"• স্ট্যাটাস: {next_info_bn}\n\n"
+        f"নিয়মাবলি:\n"
+        f"1. মোট কেনাকাটা ৳2,000 হলে পরের সব অর্ডারে 20% ছাড়।\n"
+        f"2. মোট কেনাকাটা ৳5,000 হলে পরের সব অর্ডারে 30% ছাড়।\n"
+        f"3. Dolphin প্যানেলে ডেভেলপারের নিয়ম অনুযায়ী কোনো ডিসকাউন্ট নেই।"
+    )
+  else:
+    txt = (
+        f"👑 VIP Spending Discount\n\n"
+        f"• User: {full_name} ({username})\n"
+        f"• Total Approved Spent: ৳{total_spent:.0f}\n"
+        f"• Active Discount: {vip_pct:.0f}%\n"
+        f"• Status: {next_info_en}\n\n"
+        f"Rules:\n"
+        f"1. Spend ৳2,000+ total to unlock 20% off all future orders.\n"
+        f"2. Spend ৳5,000+ total to unlock 30% off all future orders.\n"
+        f"3. No discount applies to Dolphin panels."
+    )
+  await message.answer(txt)
+
+
 @dp.message(F.text.in_(["🎁 মাই ডিসকাউন্ট", "🎁 My Discount"]))
 async def btn_my_discount(message: Message):
   admin_states.pop(message.from_user.id, None)
-  full_name, username, lang, disc_pct, ref_cnt = get_user_info(
+  full_name, username, lang, total_spent, disc_pct, ref_cnt = get_user_info(
       message.from_user.id
   )
+  vip_pct = get_vip_discount_pct(total_spent)
   if lang == "bn":
     txt = (
         f"🎁 মাই ডিসকাউন্ট\n\n"
         f"• ইউজার: {full_name} ({username})\n"
+        f"• মোট কেনাকাটা: ৳{total_spent:.0f} (VIP: {vip_pct:.0f}%)\n"
         f"• মোট সফল রেফার: {ref_cnt} জন\n"
-        f"• জমে থাকা ডিসকাউন্ট: {disc_pct:.0f}%\n\n"
+        f"• জমে থাকা রেফার ডিসকাউন্ট: {disc_pct:.0f}%\n\n"
         f"নিয়মাবলি:\n"
-        f"1. প্রতি সফল রেফারে +2% ডিসকাউন্ট জমা হয়।\n"
-        f"2. ৩ দিনের নিচের প্ল্যানে কোনো ডিসকাউন্ট নেই (0%)।\n"
-        f"3. ৩ দিন বা তার বেশি দিনের প্ল্যানে সাধারণত সর্বোচ্চ 5% এবং 600"
-        f" টাকার ওপরে সর্বোচ্চ 30% পর্যন্ত ডিসকাউন্ট পাওয়া যায়।\n"
-        f"4. Dolphin প্যানেলে ডেভেলপারের নিয়ম অনুযায়ী কোনো ডিসকাউন্ট নেই।\n"
-        f"5. ডিসকাউন্ট ব্যবহার হলে ব্যবহৃত অংশ কেটে নেওয়া হয় এবং কেনা দামের"
-        f" নিচে নামার সুযোগ নেই।"
+        f"1. মোট কেনাকাটা ৳2,000 হলে 20% এবং ৳5,000 হলে 30% VIP ছাড়।\n"
+        f"2. প্রতি সফল রেফারে +2% ডিসকাউন্ট জমা হয়।\n"
+        f"3. Dolphin প্যানেলে ডেভেলপারের নিয়ম অনুযায়ী কোনো ডিসকাউন্ট নেই।"
     )
   else:
     txt = (
         f"🎁 My Discount\n\n"
         f"• User: {full_name} ({username})\n"
+        f"• Total Spent: ৳{total_spent:.0f} (VIP: {vip_pct:.0f}%)\n"
         f"• Valid Referrals: {ref_cnt}\n"
-        f"• Saved Discount: {disc_pct:.0f}%\n\n"
+        f"• Saved Referral Discount: {disc_pct:.0f}%\n\n"
         f"Rules:\n"
-        f"1. +2% discount per valid referral.\n"
-        f"2. 0% discount on plans under 3 days.\n"
-        f"3. Up to 5% on 3+ day plans, and up to 30% above ৳600 (within"
-        f" profit safety).\n"
-        f"4. No discount on Dolphin panels.\n"
-        f"5. Used discount is deducted after order approval."
+        f"1. 20% VIP discount at ৳2,000+ spent and 30% at ৳5,000+ spent.\n"
+        f"2. +2% discount per valid referral.\n"
+        f"3. No discount on Dolphin panels."
     )
   await message.answer(txt)
 
@@ -965,7 +1117,7 @@ async def btn_my_discount(message: Message):
 async def btn_refer_link(message: Message):
   admin_states.pop(message.from_user.id, None)
   uid = message.from_user.id
-  _, _, lang, disc_pct, ref_cnt = get_user_info(uid)
+  _, _, lang, _, disc_pct, ref_cnt = get_user_info(uid)
   me = await bot.get_me()
   ref_link = f"https://t.me/{me.username}?start={uid}"
   if lang == "bn":
@@ -996,11 +1148,13 @@ async def btn_change_lang(message: Message):
 @dp.message(F.text.in_(["🛒 কি কিনুন", "🛒 Buy Keys"]))
 async def btn_buy_keys(message: Message):
   admin_states.pop(message.from_user.id, None)
-  _, _, lang, disc_pct, _ = get_user_info(message.from_user.id)
+  _, _, lang, total_spent, disc_pct, _ = get_user_info(message.from_user.id)
+  vip_pct = get_vip_discount_pct(total_spent)
+  eff_pct = max(vip_pct, disc_pct)
   header = (
-      f"🎁 জমে থাকা ডিসকাউন্ট: {disc_pct:.0f}%\nক্যাটাগরি সিলেক্ট করুন:"
+      f"👑 বর্তমান VIP ছাড়: {vip_pct:.0f}% | রেফার ছাড়: {disc_pct:.0f}%\nক্যাটাগরি সিলেক্ট করুন:"
       if lang == "bn"
-      else f"🎁 Saved Discount: {disc_pct:.0f}%\nSelect a category:"
+      else f"👑 VIP Discount: {vip_pct:.0f}% | Ref Discount: {disc_pct:.0f}% (Active: {eff_pct:.0f}%)\nSelect a category:"
   )
   await message.answer(header, reply_markup=category_kb())
 
@@ -1008,7 +1162,7 @@ async def btn_buy_keys(message: Message):
 @dp.callback_query(F.data.startswith("cat_"))
 async def cb_select_category(callback: CallbackQuery):
   cat_key = callback.data.split("_", 1)[1]
-  _, _, lang, _, _ = get_user_info(callback.from_user.id)
+  _, _, lang, _, _, _ = get_user_info(callback.from_user.id)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -1068,7 +1222,7 @@ async def cb_select_category(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "back_cats")
 async def cb_back_cats(callback: CallbackQuery):
-  _, _, lang, _, _ = get_user_info(callback.from_user.id)
+  _, _, lang, _, _, _ = get_user_info(callback.from_user.id)
   await callback.message.edit_text(
       "ক্যাটাগরি সিলেক্ট করুন:" if lang == "bn" else "Select a category:",
       reply_markup=category_kb(),
@@ -1079,7 +1233,7 @@ async def cb_back_cats(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("prod_"))
 async def cb_select_product(callback: CallbackQuery):
   pid = int(callback.data.split("_", 1)[1])
-  _, _, lang, disc_pct, _ = get_user_info(callback.from_user.id)
+  _, _, lang, total_spent, disc_pct, _ = get_user_info(callback.from_user.id)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -1112,7 +1266,7 @@ async def cb_select_product(callback: CallbackQuery):
   for pl in plans:
     base_p = float(pl["price"])
     app_pct, _, final_p = calc_discount_details(
-        pname, pl["duration"], base_p, disc_pct
+        pname, pl["duration"], base_p, disc_pct, total_spent
     )
     disc_tag = f" (-{app_pct:.0f}% → ৳{final_p:.0f})" if app_pct > 0 else ""
     label = (
@@ -1141,7 +1295,7 @@ async def cb_select_product(callback: CallbackQuery):
 async def cb_select_plan(callback: CallbackQuery):
   plid = int(callback.data.split("_", 1)[1])
   uid = callback.from_user.id
-  _, _, lang, disc_pct, _ = get_user_info(uid)
+  _, _, lang, total_spent, disc_pct, _ = get_user_info(uid)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -1162,10 +1316,10 @@ async def cb_select_plan(callback: CallbackQuery):
 
   pname = row["name"]
   duration = row["duration"]
-  base_price = float(row["price"])
+  base_price = round_to_0_or_5(float(row["price"]))
   bonus = row["bonus"] or ""
   app_pct, disc_amt, final_price = calc_discount_details(
-      pname, duration, base_price, disc_pct
+      pname, duration, base_price, disc_pct, total_spent
   )
 
   bkash_num, nagad_num = get_payment_numbers()
@@ -1202,7 +1356,7 @@ async def cb_select_plan(callback: CallbackQuery):
   if app_pct > 0:
     price_lines = (
         f"💵 মূল দাম: ৳{base_price:.0f}\n"
-        f"🎁 ডিসকাউন্ট ({app_pct:.0f}%): -৳{disc_amt:.0f}\n"
+        f"👑 ডিসকাউন্ট ({app_pct:.0f}%): -৳{disc_amt:.0f}\n"
         f"✅ পরিশোধযোগ্য: ৳{final_price:.0f} (Send Money)"
     )
   else:
@@ -1242,7 +1396,7 @@ async def cb_select_plan(callback: CallbackQuery):
 @dp.message(F.text.in_(["📦 আমার অর্ডার", "📦 My Orders"]))
 async def btn_my_orders(message: Message):
   admin_states.pop(message.from_user.id, None)
-  _, _, lang, _, _ = get_user_info(message.from_user.id)
+  _, _, lang, _, _, _ = get_user_info(message.from_user.id)
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
@@ -1290,7 +1444,7 @@ async def btn_my_orders(message: Message):
 @dp.message(F.text.in_(["📞 সাপোর্ট", "📞 Support"]))
 async def btn_support(message: Message):
   admin_states.pop(message.from_user.id, None)
-  _, _, lang, _, _ = get_user_info(message.from_user.id)
+  _, _, lang, _, _, _ = get_user_info(message.from_user.id)
   bkash_num, nagad_num = get_payment_numbers()
   msg = (
       f"সাপোর্টের জন্য যোগাযোগ করুন: {SUPPORT_HANDLE}\n"
@@ -1307,8 +1461,9 @@ def finalize_order_approval(oid: int, key_val: str):
   cur = conn.cursor()
   cur.execute(
       """
-        SELECT o.id, o.user_id, o.plan_id, o.discount_used_pct, o.status
+        SELECT o.id, o.user_id, o.plan_id, o.final_amount, o.discount_used_pct, o.status, pl.price
         FROM orders o
+        JOIN plans pl ON o.plan_id = pl.id
         WHERE o.id = ?
         """,
       (oid,),
@@ -1316,24 +1471,40 @@ def finalize_order_approval(oid: int, key_val: str):
   row = cur.fetchone()
   if not row:
     conn.close()
-    return None
+    return None, 0.0, 0.0, 0.0
 
   target_uid = row["user_id"]
   plid = row["plan_id"]
+  paid_amt = float(row["final_amount"] or row["price"] or 0.0)
   disc_used = float(row["discount_used_pct"] or 0.0)
   already_approved = row["status"] == "approved"
+
+  cur.execute(
+      "SELECT total_spent, discount_pct FROM users WHERE user_id = ?",
+      (target_uid,),
+  )
+  urow = cur.fetchone()
+  old_spent = float(urow["total_spent"] or 0.0) if urow else 0.0
+  old_vip_tier = get_vip_discount_pct(old_spent)
 
   cur.execute(
       "UPDATE orders SET delivered_key = ?, status = 'approved' WHERE id = ?",
       (key_val, oid),
   )
+
+  new_spent = old_spent
   if not already_approved:
     cur.execute(
         "UPDATE plans SET stock = CASE WHEN stock > 0 THEN stock - 1 ELSE 0"
         " END WHERE id = ?",
         (plid,),
     )
-    if disc_used > 0:
+    new_spent = round(old_spent + paid_amt, 2)
+    cur.execute(
+        "UPDATE users SET total_spent = ? WHERE user_id = ?",
+        (new_spent, target_uid),
+    )
+    if disc_used > 0 and get_vip_discount_pct(new_spent) < disc_used:
       cur.execute(
           """
                 UPDATE users
@@ -1343,9 +1514,10 @@ def finalize_order_approval(oid: int, key_val: str):
           (disc_used, target_uid),
       )
 
+  new_vip_tier = get_vip_discount_pct(new_spent)
   conn.commit()
   conn.close()
-  return target_uid
+  return target_uid, new_spent, old_vip_tier, new_vip_tier
 
 
 @dp.message(Command("key"))
@@ -1377,7 +1549,9 @@ async def cmd_admin_key(message: Message):
     return
 
   oid = row["id"]
-  target_uid = finalize_order_approval(oid, key_val)
+  target_uid, new_spent, old_tier, new_tier = finalize_order_approval(
+      oid, key_val
+  )
   if not target_uid:
     await message.answer("অর্ডার পাওয়া যায়নি।")
     return
@@ -1385,10 +1559,18 @@ async def cmd_admin_key(message: Message):
   if admin_states.get(ADMIN_ID, {}).get("order_id") == oid:
     admin_states.pop(ADMIN_ID, None)
 
+  tier_msg = ""
+  if new_tier > old_tier:
+    tier_msg = (
+        f"\n\n🎉 অভিনন্দন! আপনার মোট কেনাকাটা ৳{new_spent:.0f} পূর্ণ হওয়ায়"
+        f" এখন থেকে সব প্রোডাক্টে {new_tier:.0f}% VIP ছাড় চালু হয়েছে!"
+    )
+
   try:
     await bot.send_message(
         target_uid,
-        f"✅ আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!\n🔑 Key / Password: {key_val}",
+        f"✅ আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!\n🔑 Key / Password:"
+        f" {key_val}{tier_msg}",
     )
   except Exception:
     pass
@@ -1500,8 +1682,8 @@ async def cb_adm_users(callback: CallbackQuery):
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
-      "SELECT user_id, full_name, username, discount_pct, referral_count,"
-      " joined_at FROM users ORDER BY user_id DESC LIMIT 15"
+      "SELECT user_id, full_name, username, total_spent, discount_pct,"
+      " referral_count, joined_at FROM users ORDER BY user_id DESC LIMIT 15"
   )
   rows = cur.fetchall()
   cur.execute("SELECT COUNT(*) AS cnt FROM users")
@@ -1515,9 +1697,11 @@ async def cb_adm_users(callback: CallbackQuery):
 
   lines = [f"📊 Total Users: {total}\n"]
   for r in rows:
+    sp = float(r["total_spent"] or 0.0)
+    vp = get_vip_discount_pct(sp)
     lines.append(
         f"• {r['user_id']} | {r['full_name']} ({r['username']}) | "
-        f"🎁 {float(r['discount_pct'] or 0):.0f}% (Refs:"
+        f"Spent: ৳{sp:.0f} (VIP {vp:.0f}%) | 🎁 {float(r['discount_pct'] or 0):.0f}% (Refs:"
         f" {int(r['referral_count'] or 0)}) | 🕒 {r['joined_at']}"
     )
   await callback.message.answer("\n".join(lines))
@@ -1734,7 +1918,7 @@ async def cb_adm_orders(callback: CallbackQuery):
     )
     paid_amt = float(r["final_amount"] or r["price"] or 0.0)
     disc_u = float(r["discount_used_pct"] or 0.0)
-    disc_line = f"\n🎁 Discount Used: {disc_u:.0f}%" if disc_u > 0 else ""
+    disc_line = f"\n👑 Discount Used: {disc_u:.0f}%" if disc_u > 0 else ""
 
     caption_txt = (
         f"🔑 [PASSWORD REQUEST] Order #{r['id']} | User: {r['user_id']}\n"
@@ -1834,8 +2018,8 @@ async def handle_messages(message: Message):
       conn = get_conn()
       cur = conn.cursor()
       cur.execute(
-          "SELECT full_name, username, discount_pct, referral_count, joined_at"
-          " FROM users WHERE user_id = ?",
+          "SELECT full_name, username, total_spent, discount_pct,"
+          " referral_count, joined_at FROM users WHERE user_id = ?",
           (target_uid,),
       )
       urow = cur.fetchone()
@@ -1859,11 +2043,14 @@ async def handle_messages(message: Message):
       conn.close()
       admin_states.pop(uid, None)
 
+      sp = float(urow["total_spent"] or 0.0)
+      vp = get_vip_discount_pct(sp)
       await message.answer(
           f"🔎 ইউজার তথ্য:\n"
           f"• ID: {target_uid}\n"
           f"• নাম: {urow['full_name']} ({urow['username']})\n"
-          f"• রেফার: {int(urow['referral_count'] or 0)} | ডিসকাউন্ট:"
+          f"• মোট কেনাকাটা: ৳{sp:.0f} | VIP ডিসকাউন্ট: {vp:.0f}%\n"
+          f"• রেফার: {int(urow['referral_count'] or 0)} | রেফার ডিসকাউন্ট:"
           f" {float(urow['discount_pct'] or 0):.0f}%\n"
           f"• জয়েন: {urow['joined_at']}\n"
           f"• এপ্রুভড অর্ডার: {app_o} | পেন্ডিং অর্ডার: {pend_o}"
@@ -1880,17 +2067,27 @@ async def handle_messages(message: Message):
           else txt
       )
       oid = state["order_id"]
-      target_uid = finalize_order_approval(oid, key_val)
+      target_uid, new_spent, old_tier, new_tier = finalize_order_approval(
+          oid, key_val
+      )
       admin_states.pop(uid, None)
 
       if not target_uid:
         await message.answer("অর্ডার পাওয়া যায়নি।")
         return
 
+      tier_msg = ""
+      if new_tier > old_tier:
+        tier_msg = (
+            f"\n\n🎉 অভিনন্দন! আপনার মোট কেনাকাটা ৳{new_spent:.0f} পূর্ণ হওয়ায়"
+            f" এখন থেকে সব প্রোডাক্টে {new_tier:.0f}% VIP ছাড় চালু হয়েছে!"
+        )
+
       try:
         await bot.send_message(
             target_uid,
-            f"✅ আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!\n🔑 Key / Password: {key_val}",
+            f"✅ আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!\n🔑 Key / Password:"
+            f" {key_val}{tier_msg}",
         )
       except Exception:
         pass
@@ -2022,7 +2219,7 @@ async def handle_messages(message: Message):
           continue
 
         pname = prow["name"]
-        brand_price = calc_brand_price(site_price, pname)
+        brand_price = calc_brand_price(site_price, pname, dur)
         cur.execute(
             "INSERT INTO plans (product_id, duration, price, stock, bonus)"
             " VALUES (?, ?, ?, 20, ?)",
@@ -2174,7 +2371,7 @@ async def handle_messages(message: Message):
 
   if uid in user_states:
     ustate = user_states[uid]
-    _, _, lang, _, _ = get_user_info(uid)
+    _, _, lang, _, _, _ = get_user_info(uid)
     step = ustate.get("step")
 
     if step == "wait_proof":
@@ -2246,11 +2443,11 @@ async def handle_messages(message: Message):
           f" Key / Password."
       )
 
-      full_name, username, _, cur_disc, ref_cnt = get_user_info(uid)
+      full_name, username, _, total_spent, cur_disc, ref_cnt = get_user_info(uid)
       offer_line = f"\n🎁 Offer: {bonus}" if bonus else ""
       disc_line = (
-          f"\n🎁 Discount Applied: {disc_pct:.0f}% (Saved Bal:"
-          f" {cur_disc:.0f}%, Refs: {ref_cnt})"
+          f"\n👑 Discount Applied: {disc_pct:.0f}% (Spent:"
+          f" ৳{total_spent:.0f}, Ref Bal: {cur_disc:.0f}%, Refs: {ref_cnt})"
           if disc_pct > 0
           else ""
       )
