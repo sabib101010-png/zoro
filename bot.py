@@ -36,7 +36,7 @@ CATEGORIES = [
     ("PC_LAPTOP", "💻 PC/Laptop"),
 ]
 
-# আপনার কাস্টম প্রাইস স্ল্যাব (সাইট প্রাইস -> আপনার ব্র্যান্ড প্রাইস)
+# কাস্টম প্রাইস স্ল্যাব (সাইট প্রাইস -> ব্র্যান্ড প্রাইস)
 PRICE_SLABS = [
     (25.0, 20.0),
     (30.0, 25.0),
@@ -49,7 +49,6 @@ PRICE_SLABS = [
     (800.0, 740.0),
 ]
 
-# বাদ দেওয়া প্রোডাক্ট (আগের DB থেকেও অটো ডিলিট হবে)
 REMOVED_PRODUCTS = [
     "Br Mod Apk Mod",
     "ANGRY MOOD",
@@ -64,10 +63,27 @@ def round_to_0_or_5(amount: float) -> float:
   return float(max(5.0, snapped))
 
 
-def calc_brand_price(site_price: float) -> float:
+def is_dolphin_product(pname: str) -> bool:
+  return "dolphin" in (pname or "").strip().lower()
+
+
+def is_three_days_or_more(duration: str) -> bool:
+  s = (duration or "").strip().lower()
+  if "hour" in s or "hr" in s:
+    return False
+  m = re.search(r"(\d+)\s*day", s)
+  if not m:
+    return False
+  return int(m.group(1)) >= 3
+
+
+def calc_brand_price(site_price: float, pname: str = "") -> float:
   sp = float(site_price)
   if sp <= 0:
     return 0.0
+
+  if is_dolphin_product(pname):
+    return round_to_0_or_5(sp)
 
   if sp <= PRICE_SLABS[0][0]:
     ratio = PRICE_SLABS[0][1] / PRICE_SLABS[0][0]
@@ -87,98 +103,133 @@ def calc_brand_price(site_price: float) -> float:
           raw = y1 + t * (y2 - y1)
         break
 
-  # 45% কম কস্ট প্রাইস (0.55x) + নিরাপদ লাভের মার্জিন, সবসময় 0 বা 5-এ শেষ হবে
-  min_safe_price = (sp * 0.55) * 1.15
-  final_price = round_to_0_or_5(max(raw, min_safe_price))
-  return final_price
+  # কেনা দাম বিক্রয়মূল্যের চেয়ে ~30% কম (0.70x) ধরে নিরাপদ ফ্লোর
+  cost_est = sp * 0.70
+  min_safe_price = cost_est * 1.12
+  return round_to_0_or_5(max(raw, min_safe_price))
 
 
-# (product_name, category_key, [(duration, site_price, stock, bonus), ...])
-RAW_SITE_CATALOG = [
+def calc_discount_details(
+    pname: str, duration: str, base_price: float, user_disc_pct: float
+) -> tuple[float, float, float]:
+  """
+    রিটার্ন করে: (applied_pct, discount_amount, final_price)
+    - Dolphin প্যানেলে ডিসকাউন্ট 0%
+    - 3 দিনের নিচের প্ল্যানে ডিসকাউন্ট 0%
+    - প্রতি রেফারে 2% জমে; সাধারণ প্রোডাক্টে সর্বোচ্চ 5%, আর 600 টাকার ওপরে সর্বোচ্চ 30%
+    - কেনা দাম (প্রায় 70% of base_price) ও ন্যূনতম লাভের নিচে দাম নামতে দেবে না
+    """
+  price = float(base_price)
+  if price <= 0 or is_dolphin_product(pname) or not is_three_days_or_more(duration):
+    return 0.0, 0.0, round_to_0_or_5(price)
+
+  avail_pct = max(0.0, float(user_disc_pct or 0.0))
+  if avail_pct <= 0:
+    return 0.0, 0.0, round_to_0_or_5(price)
+
+  max_cap_pct = 30.0 if price > 600.0 else 5.0
+  applied_pct = min(avail_pct, max_cap_pct)
+
+  raw_after = price * (1.0 - (applied_pct / 100.0))
+  # কেনা দাম (~0.70x) + সামান্য লাভের সুরক্ষা যেন ডিসকাউন্টে লস না হয়
+  cost_floor = price * 0.70
+  profit_guard = price * 0.75
+  safe_floor = max(cost_floor, profit_guard)
+
+  if raw_after < safe_floor:
+    max_safe_disc_amt = max(0.0, price - safe_floor)
+    applied_pct = round((max_safe_disc_amt / price) * 100.0, 2)
+    final_price = round_to_0_or_5(safe_floor)
+  else:
+    final_price = round_to_0_or_5(raw_after)
+
+  disc_amt = max(0.0, round(price - final_price, 2))
+  if disc_amt <= 0 or applied_pct <= 0:
+    return 0.0, 0.0, round_to_0_or_5(price)
+
+  return applied_pct, disc_amt, final_price
+
+
+# (product_name, category_key, [(duration, price_or_site_price, stock, bonus, is_fixed_official), ...])
+RAW_CATALOG = [
     (
-        "DRIP CLIENT NON ROOT",
-        "NON_ROOT",
-        [
-            ("1 Days", 60.0, 20, ""),
-            ("3 Days", 100.0, 20, ""),
-            ("7 Days", 150.0, 15, ""),
-            ("15 Days", 290.0, 15, ""),
-            ("30 Days", 500.0, 10, ""),
-        ],
-    ),
-    (
-        "ANGRY MOD - ROOT",
+        "DOLPHIN PLUSH - ROOT",
         "ROOT",
         [
-            ("1 Days", 70.0, 20, ""),
-            ("7 Days", 300.0, 20, ""),
-            ("15 Days", 500.0, 15, ""),
-            ("30 Days", 800.0, 10, ""),
+            ("7 Days", 500.0, 15, "", True),
+            ("15 Days", 900.0, 10, "", True),
+            ("30 Days", 1500.0, 10, "", True),
         ],
     ),
     (
-        "DELTA MOD - ROOT",
+        "DELTA MODS - ROOT",
         "ROOT",
         [
-            ("1 Days", 60.0, 20, ""),
-            ("7 Days", 300.0, 20, ""),
-            ("15 Days", 480.0, 15, ""),
-            ("30 Days", 700.0, 10, ""),
-        ],
-    ),
-    (
-        "BR MOD NON ROOT",
-        "NON_ROOT",
-        [
-            ("1 Days", 50.0, 25, ""),
-            ("10 Days", 400.0, 15, ""),
-            ("30 Days", 800.0, 10, ""),
+            ("1 Day", 50.0, 25, "", False),
+            ("7 Day", 280.0, 20, "", False),
+            ("15 Day", 480.0, 15, "", False),
+            ("30 Day", 700.0, 10, "", False),
         ],
     ),
     (
         "BR MODS - ROOT",
         "ROOT",
         [
-            ("1 Days", 40.0, 25, ""),
-            ("7 Days", 200.0, 20, ""),
-            ("15 Days", 400.0, 15, ""),
-            ("30 Days", 500.0, 10, ""),
+            ("1 Day", 50.0, 25, "", False),
+            ("10 Day", 380.0, 15, "", False),
+            ("30 Day", 680.0, 10, "", False),
         ],
     ),
     (
-        "REZZX MODZ IOS",
-        "IOS",
-        [
-            ("1 HOURS", 12.0, 30, ""),
-            ("2 HOURS", 20.0, 30, ""),
-            ("3 HOURS", 35.0, 30, ""),
-            ("6 HOURS", 70.0, 25, ""),
-            ("12 HOURS", 90.0, 25, ""),
-            ("1 Days", 120.0, 20, ""),
-            ("3 Days", 280.0, 20, ""),
-            ("7 Days", 380.0, 15, ""),
-        ],
-    ),
-    (
-        "ZYTRON PRO - ROOT",
+        "TITAN MODS - ROOT",
         "ROOT",
         [
-            ("1 Days", 70.0, 20, ""),
-            ("7 Days", 300.0, 20, ""),
-            ("15 Days", 500.0, 15, ""),
-            ("31 Days", 700.0, 10, ""),
+            ("1 Day", 50.0, 25, "", False),
+            ("7 Day", 250.0, 20, "", False),
+            ("15 Day", 450.0, 15, "", False),
+            ("30 Day", 700.0, 10, "", False),
         ],
     ),
     (
-        "DRIP WIRE EXTERNAL",
+        "DRIP WIRE - NON ROOT",
         "NON_ROOT",
         [
-            ("3 HOURS", 25.0, 30, ""),
-            ("6 HOURS", 40.0, 30, ""),
-            ("12 HOURS", 70.0, 25, ""),
-            ("24 HOURS", 100.0, 25, ""),
-            ("7 Days", 350.0, 15, ""),
-            ("30 Days", 700.0, 10, ""),
+            ("3 Hour", 25.0, 30, "", False),
+            ("6 Hour", 50.0, 30, "", False),
+            ("12 Hour", 80.0, 25, "", False),
+            ("1 Day", 120.0, 20, "", False),
+            ("7 Day", 480.0, 15, "", False),
+            ("30 Day", 850.0, 10, "", False),
+        ],
+    ),
+    (
+        "ANGRY MODS - ROOT",
+        "ROOT",
+        [
+            ("1 Day", 70.0, 20, "", False),
+            ("7 Day", 300.0, 20, "", False),
+            ("15 Day", 500.0, 15, "", False),
+            ("30 Day", 800.0, 10, "", False),
+        ],
+    ),
+    (
+        "DRIP APKMOD - NON ROOT",
+        "NON_ROOT",
+        [
+            ("1 Day", 50.0, 25, "", False),
+            ("3 Day", 100.0, 20, "", False),
+            ("7 Day", 200.0, 20, "", False),
+            ("15 Day", 350.0, 15, "", False),
+            ("30 Day", 580.0, 10, "", False),
+        ],
+    ),
+    (
+        "BR MOD PC",
+        "PC_LAPTOP",
+        [
+            ("1 Day", 90.0, 20, "", False),
+            ("10 Day", 280.0, 15, "", False),
+            ("30 Day", 480.0, 10, "", False),
         ],
     ),
 ]
@@ -187,9 +238,19 @@ CATALOG_PRODUCTS = [
     (
         pname,
         cat_key,
-        [(dur, calc_brand_price(site_p), stk, bon) for dur, site_p, stk, bon in plist],
+        [
+            (
+                dur,
+                round_to_0_or_5(pr)
+                if fixed_off
+                else calc_brand_price(pr, pname),
+                stk,
+                bon,
+            )
+            for dur, pr, stk, bon, fixed_off in plist
+        ],
     )
-    for pname, cat_key, plist in RAW_SITE_CATALOG
+    for pname, cat_key, plist in RAW_CATALOG
 ]
 
 admin_states = {}
@@ -257,7 +318,7 @@ def is_valid_trx_or_proof_text(text: str) -> tuple[bool, str]:
 
 def is_duplicate_proof(proof_val: str) -> bool:
   val = (proof_val or "").strip().upper()
-  if not val or val == "BALANCE_KEY_REQ":
+  if not val:
     return False
 
   conn = get_conn()
@@ -270,17 +331,8 @@ def is_duplicate_proof(proof_val: str) -> bool:
       (val,),
   )
   o_cnt = cur.fetchone()["cnt"]
-
-  cur.execute(
-      """
-        SELECT COUNT(*) AS cnt FROM balance_requests
-        WHERE UPPER(TRIM(proof_text)) = ? AND status IN ('pending', 'approved')
-        """,
-      (val,),
-  )
-  b_cnt = cur.fetchone()["cnt"]
   conn.close()
-  return (o_cnt + b_cnt) > 0
+  return o_cnt > 0
 
 
 def sync_catalog_prices(cur: sqlite3.Cursor):
@@ -343,6 +395,9 @@ def init_db():
             username TEXT DEFAULT '',
             lang TEXT DEFAULT 'bn',
             balance REAL DEFAULT 0.0,
+            discount_pct REAL DEFAULT 0.0,
+            referral_count INTEGER DEFAULT 0,
+            referred_by INTEGER DEFAULT 0,
             joined_at TEXT DEFAULT ''
         )
         """)
@@ -373,17 +428,8 @@ def init_db():
             trx_id TEXT DEFAULT '',
             proof_photo_id TEXT DEFAULT '',
             delivered_key TEXT DEFAULT '',
-            status TEXT DEFAULT 'pending_payment',
-            created_at TEXT DEFAULT ''
-        )
-        """)
-  cur.execute("""
-        CREATE TABLE IF NOT EXISTS balance_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            requested_amount REAL DEFAULT 0.0,
-            proof_text TEXT DEFAULT '',
-            proof_photo_id TEXT DEFAULT '',
+            discount_used_pct REAL DEFAULT 0.0,
+            final_amount REAL DEFAULT 0.0,
             status TEXT DEFAULT 'pending_payment',
             created_at TEXT DEFAULT ''
         )
@@ -396,10 +442,25 @@ def init_db():
         )
         """)
 
+  cur.execute("PRAGMA table_info(users)")
+  u_cols = [c["name"] for c in cur.fetchall()]
+  if "discount_pct" not in u_cols:
+    cur.execute("ALTER TABLE users ADD COLUMN discount_pct REAL DEFAULT 0.0")
+  if "referral_count" not in u_cols:
+    cur.execute("ALTER TABLE users ADD COLUMN referral_count INTEGER DEFAULT 0")
+  if "referred_by" not in u_cols:
+    cur.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER DEFAULT 0")
+
   cur.execute("PRAGMA table_info(orders)")
   o_cols = [c["name"] for c in cur.fetchall()]
   if "proof_photo_id" not in o_cols:
     cur.execute("ALTER TABLE orders ADD COLUMN proof_photo_id TEXT DEFAULT ''")
+  if "discount_used_pct" not in o_cols:
+    cur.execute(
+        "ALTER TABLE orders ADD COLUMN discount_used_pct REAL DEFAULT 0.0"
+    )
+  if "final_amount" not in o_cols:
+    cur.execute("ALTER TABLE orders ADD COLUMN final_amount REAL DEFAULT 0.0")
 
   cur.execute("PRAGMA table_info(products)")
   p_cols = [c["name"] for c in cur.fetchall()]
@@ -441,7 +502,7 @@ def update_payment_number(method: str, number: str):
   conn.close()
 
 
-def register_or_update_user(message: Message):
+def register_or_update_user(message: Message, referrer_id: int = 0):
   uid = message.from_user.id
   full_name = message.from_user.full_name or "User"
   username = (
@@ -451,23 +512,51 @@ def register_or_update_user(message: Message):
 
   conn = get_conn()
   cur = conn.cursor()
-  cur.execute("SELECT lang, balance FROM users WHERE user_id = ?", (uid,))
+  cur.execute(
+      "SELECT lang, discount_pct, referral_count FROM users WHERE user_id = ?",
+      (uid,),
+  )
   existing = cur.fetchone()
   is_new = existing is None
+  ref_awarded_to = 0
 
   if is_new:
+    valid_ref = 0
+    if referrer_id and referrer_id != uid:
+      cur.execute("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,))
+      if cur.fetchone():
+        valid_ref = referrer_id
+
     cur.execute(
         """
-            INSERT INTO users (user_id, full_name, username, lang, balance, joined_at)
-            VALUES (?, ?, ?, 'bn', 0.0, ?)
+            INSERT INTO users (
+                user_id, full_name, username, lang, balance,
+                discount_pct, referral_count, referred_by, joined_at
+            )
+            VALUES (?, ?, ?, 'bn', 0.0, 0.0, 0, ?, ?)
             """,
-        (uid, full_name, username, joined),
+        (uid, full_name, username, valid_ref, joined),
     )
+    if valid_ref:
+      # প্রতি বৈধ রেফারে 2% ডিসকাউন্ট যোগ (ম্যাক্স 30% পর্যন্ত জমতে পারবে)
+      cur.execute(
+          """
+                UPDATE users
+                SET referral_count = referral_count + 1,
+                    discount_pct = MIN(30.0, ROUND(discount_pct + 2.0, 2))
+                WHERE user_id = ?
+                """,
+          (valid_ref,),
+      )
+      ref_awarded_to = valid_ref
+
     lang = "bn"
-    bal = 0.0
+    disc_pct = 0.0
+    ref_cnt = 0
   else:
     lang = existing["lang"] or "bn"
-    bal = float(existing["balance"] or 0.0)
+    disc_pct = float(existing["discount_pct"] or 0.0)
+    ref_cnt = int(existing["referral_count"] or 0)
     cur.execute(
         """
             UPDATE users SET full_name = ?, username = ?
@@ -481,7 +570,17 @@ def register_or_update_user(message: Message):
   conn.commit()
   conn.close()
 
-  return is_new, lang, bal, total_users, full_name, username, joined
+  return (
+      is_new,
+      lang,
+      disc_pct,
+      ref_cnt,
+      total_users,
+      full_name,
+      username,
+      joined,
+      ref_awarded_to,
+  )
 
 
 def set_lang(user_id: int, lang: str):
@@ -489,8 +588,8 @@ def set_lang(user_id: int, lang: str):
   cur = conn.cursor()
   cur.execute(
       """
-        INSERT INTO users (user_id, full_name, username, lang, balance, joined_at)
-        VALUES (?, 'User', 'N/A', ?, 0.0, ?)
+        INSERT INTO users (user_id, full_name, username, lang, balance, discount_pct, referral_count, referred_by, joined_at)
+        VALUES (?, 'User', 'N/A', ?, 0.0, 0.0, 0, 0, ?)
         ON CONFLICT(user_id) DO UPDATE SET lang = excluded.lang
         """,
       (user_id, lang, now_str()),
@@ -503,18 +602,20 @@ def get_user_info(user_id: int):
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
-      "SELECT full_name, username, lang, balance FROM users WHERE user_id = ?",
+      "SELECT full_name, username, lang, discount_pct, referral_count FROM"
+      " users WHERE user_id = ?",
       (user_id,),
   )
   row = cur.fetchone()
   conn.close()
   if not row:
-    return "User", "N/A", "bn", 0.0
+    return "User", "N/A", "bn", 0.0, 0
   return (
       row["full_name"] or "User",
       row["username"] or "N/A",
       row["lang"] or "bn",
-      float(row["balance"] or 0.0),
+      float(row["discount_pct"] or 0.0),
+      int(row["referral_count"] or 0),
   )
 
 
@@ -547,6 +648,12 @@ def category_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[
           [
+              InlineKeyboardButton(text="🛡 Root", callback_data="cat_ROOT"),
+              InlineKeyboardButton(
+                  text="🔓 Non Root", callback_data="cat_NON_ROOT"
+              ),
+          ],
+          [
               InlineKeyboardButton(text="📱 iOS", callback_data="cat_IOS"),
               InlineKeyboardButton(
                   text="💻 PC/Laptop", callback_data="cat_PC_LAPTOP"
@@ -554,13 +661,7 @@ def category_kb() -> InlineKeyboardMarkup:
           ],
           [
               InlineKeyboardButton(
-                  text="🔓 Non Root", callback_data="cat_NON_ROOT"
-              ),
-              InlineKeyboardButton(text="🛡 Root", callback_data="cat_ROOT"),
-          ],
-          [
-              InlineKeyboardButton(
-                  text="🌐 ALL (সব প্রোডাক্ট)", callback_data="cat_ALL"
+                  text="🌐 ALL Products", callback_data="cat_ALL"
               ),
           ],
       ]
@@ -572,10 +673,10 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
     rows = [
         [
             KeyboardButton(text="🛒 Buy Keys"),
-            KeyboardButton(text="➕ Add Balance"),
+            KeyboardButton(text="🎁 My Discount"),
         ],
         [
-            KeyboardButton(text="💰 Balance"),
+            KeyboardButton(text="🔗 Refer & Earn"),
             KeyboardButton(text="📦 My Orders"),
         ],
         [
@@ -587,10 +688,10 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
     rows = [
         [
             KeyboardButton(text="🛒 কি কিনুন"),
-            KeyboardButton(text="➕ ব্যালেন্স যোগ"),
+            KeyboardButton(text="🎁 মাই ডিসকাউন্ট"),
         ],
         [
-            KeyboardButton(text="💰 ব্যালেন্স"),
+            KeyboardButton(text="🔗 রেফার লিংক"),
             KeyboardButton(text="📦 আমার অর্ডার"),
         ],
         [
@@ -644,34 +745,21 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
                   text="📋 Pending Orders", callback_data="adm_orders"
               ),
               InlineKeyboardButton(
-                  text="💳 Pending Bal Reqs", callback_data="adm_balreqs"
-              ),
-          ],
-          [
-              InlineKeyboardButton(
-                  text="➕ Balance (+)", callback_data="adm_bal_plus"
-              ),
-              InlineKeyboardButton(
-                  text="➖ Balance (-)", callback_data="adm_bal_minus"
-              ),
-          ],
-          [
-              InlineKeyboardButton(
                   text="💳 Payment Numbers", callback_data="adm_paynums"
               ),
+          ],
+          [
               InlineKeyboardButton(
                   text="🔎 User Lookup", callback_data="adm_lookup"
               ),
-          ],
-          [
               InlineKeyboardButton(
                   text="📊 Sales Report", callback_data="adm_report"
               ),
+          ],
+          [
               InlineKeyboardButton(
                   text="📢 Broadcast", callback_data="adm_broadcast"
               ),
-          ],
-          [
               InlineKeyboardButton(
                   text="👥 Users & Stats", callback_data="adm_users"
               ),
@@ -702,15 +790,6 @@ def order_approve_start_kb(oid: int) -> InlineKeyboardMarkup:
   ]])
 
 
-def bal_req_kb(bid: int) -> InlineKeyboardMarkup:
-  return InlineKeyboardMarkup(inline_keyboard=[[
-      InlineKeyboardButton(
-          text="💰 Add Balance (/balance)", callback_data=f"reqbal_{bid}"
-      ),
-      InlineKeyboardButton(text="❌ Reject", callback_data=f"rejbal_{bid}"),
-  ]])
-
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -721,9 +800,32 @@ async def cmd_start(message: Message):
   admin_states.pop(uid, None)
   user_states.pop(uid, None)
 
-  is_new, lang, bal, total_users, full_name, username, joined = (
-      register_or_update_user(message)
-  )
+  ref_id = 0
+  parts = (message.text or "").strip().split(maxsplit=1)
+  if len(parts) == 2 and parts[1].strip().isdigit():
+    ref_id = int(parts[1].strip())
+
+  (
+      is_new,
+      lang,
+      disc_pct,
+      ref_cnt,
+      total_users,
+      full_name,
+      username,
+      joined,
+      ref_awarded_to,
+  ) = register_or_update_user(message, referrer_id=ref_id)
+
+  if ref_awarded_to:
+    try:
+      await bot.send_message(
+          ref_awarded_to,
+          f"🎉 নতুন রেফার সফল হয়েছে! আপনার মাই ডিসকাউন্টে +2% ডিসকাউন্ট যোগ"
+          f" হয়েছে।",
+      )
+    except Exception:
+      pass
 
   if is_new and message.from_user.id != ADMIN_ID:
     new_user_alert = (
@@ -731,7 +833,7 @@ async def cmd_start(message: Message):
         f"👤 Name: {full_name}\n"
         f"🆔 Username: {username}\n"
         f"💬 Chat ID: {message.from_user.id}\n"
-        f"💰 Balance: ৳{bal:.2f}\n"
+        f"🔗 Referred By: {ref_awarded_to or 'None'}\n"
         f"🕒 Time: {joined}\n"
         f"👥 Total Users: {total_users}"
     )
@@ -744,69 +846,95 @@ async def cmd_start(message: Message):
       "ভাষা বেছে নিন / Choose your language:",
       reply_markup=lang_kb(),
   )
-  await message.answer(
-      f"⚡ ZORO 404 OFFICIAL\n💰 ব্যালেন্স: ৳{bal:.2f}"
+  welcome_txt = (
+      f"ZORO 404 OFFICIAL\n"
+      f"🎁 জমে থাকা ডিসকাউন্ট: {disc_pct:.0f}% | রেফার: {ref_cnt}"
       if lang == "bn"
-      else f"⚡ ZORO 404 OFFICIAL\n💰 Balance: ৳{bal:.2f}",
-      reply_markup=main_menu(message.from_user.id, lang),
+      else f"ZORO 404 OFFICIAL\n"
+      f"🎁 Saved Discount: {disc_pct:.0f}% | Referrals: {ref_cnt}"
   )
+  await message.answer(welcome_txt, reply_markup=main_menu(uid, lang))
 
 
 @dp.callback_query(F.data.startswith("setlang_"))
 async def cb_setlang(callback: CallbackQuery):
   lang = callback.data.split("_", 1)[1]
   set_lang(callback.from_user.id, lang)
-  _, _, _, bal = get_user_info(callback.from_user.id)
+  _, _, _, disc_pct, ref_cnt = get_user_info(callback.from_user.id)
   await callback.message.edit_text(
       "✅ বাংলা সেট করা হয়েছে।" if lang == "bn" else "✅ English set."
   )
   await callback.message.answer(
-      f"মেইন মেনু | 💰 ব্যালেন্স: ৳{bal:.2f}"
+      f"মেইন মেনু | 🎁 ডিসকাউন্ট: {disc_pct:.0f}% (রেফার: {ref_cnt})"
       if lang == "bn"
-      else f"Main Menu | 💰 Balance: ৳{bal:.2f}",
+      else f"Main Menu | 🎁 Discount: {disc_pct:.0f}% (Refs: {ref_cnt})",
       reply_markup=main_menu(callback.from_user.id, lang),
   )
   await callback.answer()
 
 
-@dp.message(F.text.in_(["💰 ব্যালেন্স", "💰 Balance"]))
-async def btn_balance(message: Message):
+@dp.message(F.text.in_(["🎁 মাই ডিসকাউন্ট", "🎁 My Discount"]))
+async def btn_my_discount(message: Message):
   admin_states.pop(message.from_user.id, None)
-  full_name, username, lang, bal = get_user_info(message.from_user.id)
+  full_name, username, lang, disc_pct, ref_cnt = get_user_info(
+      message.from_user.id
+  )
   if lang == "bn":
-    await message.answer(
-        f"👤 নাম: {full_name}\n"
-        f"🆔 ইউজারনেম: {username}\n"
-        f"💬 আইডি: {message.from_user.id}\n"
-        f"💰 বর্তমান ব্যালেন্স: ৳{bal:.2f}"
+    txt = (
+        f"🎁 মাই ডিসকাউন্ট\n\n"
+        f"• ইউজার: {full_name} ({username})\n"
+        f"• মোট সফল রেফার: {ref_cnt} জন\n"
+        f"• জমে থাকা ডিসকাউন্ট: {disc_pct:.0f}%\n\n"
+        f"নিয়মাবলি:\n"
+        f"1. প্রতি সফল রেফারে +2% ডিসকাউন্ট জমা হয়।\n"
+        f"2. ৩ দিনের নিচের প্ল্যানে কোনো ডিসকাউন্ট নেই (0%)।\n"
+        f"3. ৩ দিন বা তার বেশি দিনের প্ল্যানে সাধারণত সর্বোচ্চ 5% এবং 600"
+        f" টাকার ওপরে সর্বোচ্চ 30% পর্যন্ত ডিসকাউন্ট পাওয়া যায়।\n"
+        f"4. Dolphin প্যানেলে ডেভেলপারের নিয়ম অনুযায়ী কোনো ডিসকাউন্ট নেই।\n"
+        f"5. ডিসকাউন্ট ব্যবহার হলে ব্যবহৃত অংশ কেটে নেওয়া হয় এবং কেনা দামের"
+        f" নিচে নামার সুযোগ নেই।"
     )
   else:
-    await message.answer(
-        f"👤 Name: {full_name}\n"
-        f"🆔 Username: {username}\n"
-        f"💬 ID: {message.from_user.id}\n"
-        f"💰 Current Balance: ৳{bal:.2f}"
+    txt = (
+        f"🎁 My Discount\n\n"
+        f"• User: {full_name} ({username})\n"
+        f"• Valid Referrals: {ref_cnt}\n"
+        f"• Saved Discount: {disc_pct:.0f}%\n\n"
+        f"Rules:\n"
+        f"1. +2% discount per valid referral.\n"
+        f"2. 0% discount on plans under 3 days.\n"
+        f"3. Up to 5% on 3+ day plans, and up to 30% above ৳600 (within"
+        f" profit safety).\n"
+        f"4. No discount on Dolphin panels.\n"
+        f"5. Used discount is deducted after order approval."
     )
+  await message.answer(txt)
 
 
-@dp.message(F.text.in_(["➕ ব্যালেন্স যোগ", "➕ Add Balance"]))
-async def btn_add_balance(message: Message):
+@dp.message(F.text.in_(["🔗 রেফার লিংক", "🔗 Refer & Earn"]))
+async def btn_refer_link(message: Message):
+  admin_states.pop(message.from_user.id, None)
   uid = message.from_user.id
-  admin_states.pop(uid, None)
-  _, _, lang, bal = get_user_info(uid)
-  user_states[uid] = {"step": "wait_bal_amount"}
+  _, _, lang, disc_pct, ref_cnt = get_user_info(uid)
+  me = await bot.get_me()
+  ref_link = f"https://t.me/{me.username}?start={uid}"
   if lang == "bn":
-    await message.answer(
-        f"💰 বর্তমান ব্যালেন্স: ৳{bal:.2f}\n\n"
-        f"কত টাকা ব্যালেন্স যোগ করতে চান সেই সংখ্যাটি লিখে পাঠান:\n"
-        f"উদাহরণ: 200"
+    txt = (
+        f"🔗 রেফার ও ডিসকাউন্ট\n\n"
+        f"আপনার রেফার লিংক:\n{ref_link}\n\n"
+        f"• সফল রেফার: {ref_cnt} জন\n"
+        f"• জমে থাকা ডিসকাউন্ট: {disc_pct:.0f}%\n"
+        f"প্রতি রেফারে 2% ডিসকাউন্ট পাবেন।"
     )
   else:
-    await message.answer(
-        f"💰 Current Balance: ৳{bal:.2f}\n\n"
-        f"Type and send how much balance you want to add:\n"
-        f"Example: 200"
+    txt = (
+        f"🔗 Refer & Discount\n\n"
+        f"Your referral link:\n{ref_link}\n\n"
+        f"• Valid Referrals: {ref_cnt}\n"
+        f"• Saved Discount: {disc_pct:.0f}%\n"
+        f"Earn 2% discount per valid referral."
     )
+  await message.answer(txt)
 
 
 @dp.message(F.text.in_(["🌐 ভাষা পরিবর্তন", "🌐 Change Language"]))
@@ -818,11 +946,11 @@ async def btn_change_lang(message: Message):
 @dp.message(F.text.in_(["🛒 কি কিনুন", "🛒 Buy Keys"]))
 async def btn_buy_keys(message: Message):
   admin_states.pop(message.from_user.id, None)
-  _, _, lang, bal = get_user_info(message.from_user.id)
+  _, _, lang, disc_pct, _ = get_user_info(message.from_user.id)
   header = (
-      f"💰 ব্যালেন্স: ৳{bal:.2f}\nআগে ক্যাটাগরি সিলেক্ট করুন (অথবা ALL দিন):"
+      f"🎁 জমে থাকা ডিসকাউন্ট: {disc_pct:.0f}%\nক্যাটাগরি সিলেক্ট করুন:"
       if lang == "bn"
-      else f"💰 Balance: ৳{bal:.2f}\nSelect a category first (or choose ALL):"
+      else f"🎁 Saved Discount: {disc_pct:.0f}%\nSelect a category:"
   )
   await message.answer(header, reply_markup=category_kb())
 
@@ -830,7 +958,7 @@ async def btn_buy_keys(message: Message):
 @dp.callback_query(F.data.startswith("cat_"))
 async def cb_select_category(callback: CallbackQuery):
   cat_key = callback.data.split("_", 1)[1]
-  _, _, lang, _ = get_user_info(callback.from_user.id)
+  _, _, lang, _, _ = get_user_info(callback.from_user.id)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -887,11 +1015,9 @@ async def cb_select_category(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "back_cats")
 async def cb_back_cats(callback: CallbackQuery):
-  _, _, lang, _ = get_user_info(callback.from_user.id)
+  _, _, lang, _, _ = get_user_info(callback.from_user.id)
   await callback.message.edit_text(
-      "ক্যাটাগরি সিলেক্ট করুন (অথবা ALL দিন):"
-      if lang == "bn"
-      else "Select a category (or ALL):",
+      "ক্যাটাগরি সিলেক্ট করুন:" if lang == "bn" else "Select a category:",
       reply_markup=category_kb(),
   )
   await callback.answer()
@@ -900,7 +1026,7 @@ async def cb_back_cats(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("prod_"))
 async def cb_select_product(callback: CallbackQuery):
   pid = int(callback.data.split("_", 1)[1])
-  _, _, lang, _ = get_user_info(callback.from_user.id)
+  _, _, lang, disc_pct, _ = get_user_info(callback.from_user.id)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -920,7 +1046,7 @@ async def cb_select_product(callback: CallbackQuery):
 
   if not plans:
     await callback.answer(
-        "এই প্রোডাক্টে এখনো কোনো প্ল্যান/দিন যোগ করা হয়নি।"
+        "এই প্রোডাক্টে এখনো কোনো প্ল্যান যোগ করা হয়নি।"
         if lang == "bn"
         else "No plans added for this product yet.",
         show_alert=True,
@@ -931,8 +1057,13 @@ async def cb_select_product(callback: CallbackQuery):
   cat_back = p_row["category"] or "ALL"
   buttons = []
   for pl in plans:
+    base_p = float(pl["price"])
+    app_pct, _, final_p = calc_discount_details(
+        pname, pl["duration"], base_p, disc_pct
+    )
+    disc_tag = f" (-{app_pct:.0f}% → ৳{final_p:.0f})" if app_pct > 0 else ""
     label = (
-        f"{pl['duration']} - ৳{float(pl['price']):.0f}{format_bonus_bracket(pl['bonus'])}"
+        f"{pl['duration']} - ৳{base_p:.0f}{disc_tag}{format_bonus_bracket(pl['bonus'])}"
     )
     buttons.append(
         [InlineKeyboardButton(text=label, callback_data=f"plan_{pl['id']}")]
@@ -957,7 +1088,7 @@ async def cb_select_product(callback: CallbackQuery):
 async def cb_select_plan(callback: CallbackQuery):
   plid = int(callback.data.split("_", 1)[1])
   uid = callback.from_user.id
-  _, _, lang, bal = get_user_info(uid)
+  _, _, lang, disc_pct, _ = get_user_info(uid)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -978,17 +1109,23 @@ async def cb_select_plan(callback: CallbackQuery):
 
   pname = row["name"]
   duration = row["duration"]
-  price = float(row["price"])
+  base_price = float(row["price"])
   bonus = row["bonus"] or ""
+  app_pct, disc_amt, final_price = calc_discount_details(
+      pname, duration, base_price, disc_pct
+  )
+
   bkash_num, nagad_num = get_payment_numbers()
   created = now_str()
 
   cur.execute(
       """
-        INSERT INTO orders (user_id, plan_id, status, created_at)
-        VALUES (?, ?, 'pending_payment', ?)
+        INSERT INTO orders (
+            user_id, plan_id, discount_used_pct, final_amount, status, created_at
+        )
+        VALUES (?, ?, ?, ?, 'pending_payment', ?)
         """,
-      (uid, plid, created),
+      (uid, plid, app_pct, final_price, created),
   )
   oid = cur.lastrowid
   conn.commit()
@@ -1000,27 +1137,29 @@ async def cb_select_plan(callback: CallbackQuery):
       "plan_id": plid,
       "pname": pname,
       "duration": duration,
-      "price": price,
+      "base_price": base_price,
+      "discount_pct": app_pct,
+      "discount_amt": disc_amt,
+      "final_price": final_price,
       "bonus": bonus,
       "created_at": created,
   }
 
   bonus_line = f"\n🎁 অফার: {bonus}" if bonus else ""
-  pay_bal_text = (
-      f"💰 ব্যালেন্সের টাকা দিয়ে কি কিনুন (৳{price:.0f})"
-      if lang == "bn"
-      else f"💰 Buy Key with Balance (৳{price:.0f})"
-  )
-  kb_rows = [
-      [InlineKeyboardButton(text=pay_bal_text, callback_data=f"paybal_{oid}")]
-  ]
+  if app_pct > 0:
+    price_lines = (
+        f"💵 মূল দাম: ৳{base_price:.0f}\n"
+        f"🎁 ডিসকাউন্ট ({app_pct:.0f}%): -৳{disc_amt:.0f}\n"
+        f"✅ পরিশোধযোগ্য: ৳{final_price:.0f} (Send Money)"
+    )
+  else:
+    price_lines = f"💵 মোট টাকা: ৳{final_price:.0f} (Send Money)"
 
   if lang == "bn":
     msg = (
         f"🛒 অর্ডার #{oid}\n"
         f"📦 {pname} ({duration}){bonus_line}\n"
-        f"💵 মোট টাকা: ৳{price:.0f} (Send Money)\n"
-        f"💰 আপনার ব্যালেন্স: ৳{bal:.2f}\n\n"
+        f"{price_lines}\n\n"
         f"📲 পেমেন্ট নম্বর:\n"
         f"• বিকাশ: {bkash_num}\n"
         f"• নগদ: {nagad_num}\n\n"
@@ -1033,8 +1172,7 @@ async def cb_select_plan(callback: CallbackQuery):
     msg = (
         f"🛒 Order #{oid}\n"
         f"📦 {pname} ({duration}){bonus_line}\n"
-        f"💵 Amount: ৳{price:.0f} (Send Money)\n"
-        f"💰 Your Balance: ৳{bal:.2f}\n\n"
+        f"{price_lines}\n\n"
         f"📲 Payment Numbers:\n"
         f"• bKash: {bkash_num}\n"
         f"• Nagad: {nagad_num}\n\n"
@@ -1044,109 +1182,20 @@ async def cb_select_plan(callback: CallbackQuery):
         f"✍️ Valid TrxID / mobile number"
     )
 
-  await callback.message.edit_text(
-      msg,
-      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
-  )
-  await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("paybal_"))
-async def cb_pay_with_balance(callback: CallbackQuery):
-  oid = int(callback.data.split("_", 1)[1])
-  uid = callback.from_user.id
-  full_name, username, lang, bal = get_user_info(uid)
-
-  conn = get_conn()
-  cur = conn.cursor()
-  cur.execute(
-      """
-        SELECT o.user_id, o.status, o.created_at, p.name, pl.duration, pl.price, pl.bonus
-        FROM orders o
-        JOIN plans pl ON o.plan_id = pl.id
-        JOIN products p ON pl.product_id = p.id
-        WHERE o.id = ? AND o.user_id = ?
-        """,
-      (oid, uid),
-  )
-  row = cur.fetchone()
-  if not row:
-    conn.close()
-    await callback.answer("Order not found", show_alert=True)
-    return
-
-  if row["status"] != "pending_payment":
-    conn.close()
-    await callback.answer("Already processed", show_alert=True)
-    return
-
-  price = float(row["price"])
-  if bal < price:
-    conn.close()
-    await callback.answer(
-        f"আপনার ব্যালেন্সে পর্যাপ্ত টাকা নেই (প্রয়োজন ৳{price:.0f}, আছে"
-        f" ৳{bal:.2f})।"
-        if lang == "bn"
-        else f"Insufficient balance (Need ৳{price:.0f}, you have ৳{bal:.2f}).",
-        show_alert=True,
-    )
-    return
-
-  new_bal = bal - price
-  cur.execute("UPDATE users SET balance = ? WHERE user_id = ?", (new_bal, uid))
-  cur.execute(
-      "UPDATE orders SET trx_id = 'BALANCE_KEY_REQ', status = 'pending' WHERE"
-      " id = ?",
-      (oid,),
-  )
-  conn.commit()
-  conn.close()
-
-  user_states.pop(uid, None)
-
-  await callback.message.edit_text(
-      f"✅ ব্যালেন্স কি রিকোয়েস্ট #{oid} পাঠানো হয়েছে!\n"
-      f"📦 প্রোডাক্ট: {row['name']} ({row['duration']})\n"
-      f"💸 ব্যালেন্স থেকে কাটা হয়েছে: ৳{price:.0f} | বাকি ব্যালেন্স:"
-      f" ৳{new_bal:.2f}\n"
-      f"অ্যাডমিন /key কমান্ড দিয়ে কি/পাসওয়ার্ড পাঠাবেন।"
-      if lang == "bn"
-      else f"✅ Balance Key Request #{oid} sent!\n"
-      f"📦 Product: {row['name']} ({row['duration']})\n"
-      f"💸 Deducted: ৳{price:.0f} | Remaining Balance: ৳{new_bal:.2f}\n"
-      f"Admin will send your key/password using /key."
-  )
-
-  offer_line = f"\n🎁 Offer: {row['bonus']}" if row["bonus"] else ""
-  admin_alert = (
-      f"💰🔑 [ব্যালেন্স টাকায় কি রিকোয়েস্ট] Order #{oid}\n"
-      f"🕒 Time: {row['created_at']}\n"
-      f"👤 User: {full_name} ({username}) | ID: {uid}\n"
-      f"📦 প্যানেল / প্রোডাক্ট: {row['name']} ({row['duration']})\n"
-      f"💵 কাটা টাকা: ৳{price:.0f} | বাকি ব্যালেন্স: ৳{new_bal:.2f}{offer_line}\n\n"
-      f"কি / পাসওয়ার্ড দিতে লিখুন:\n"
-      f"/key XXXXXXXXXXXXX"
-  )
-  try:
-    await bot.send_message(
-        ADMIN_ID,
-        admin_alert,
-        reply_markup=order_approve_start_kb(oid),
-    )
-  except Exception:
-    pass
+  await callback.message.edit_text(msg)
   await callback.answer()
 
 
 @dp.message(F.text.in_(["📦 আমার অর্ডার", "📦 My Orders"]))
 async def btn_my_orders(message: Message):
   admin_states.pop(message.from_user.id, None)
-  _, _, lang, _ = get_user_info(message.from_user.id)
+  _, _, lang, _, _ = get_user_info(message.from_user.id)
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
       """
-        SELECT o.id, p.name, pl.duration, pl.price, o.sender_number, o.trx_id,
+        SELECT o.id, p.name, pl.duration, pl.price, o.final_amount,
+               o.discount_used_pct, o.sender_number, o.trx_id,
                o.proof_photo_id, o.delivered_key, o.status, o.created_at
         FROM orders o
         JOIN plans pl ON o.plan_id = pl.id
@@ -1174,9 +1223,12 @@ async def btn_my_orders(message: Message):
     )
     key_txt = f"\n   🔑 Key/Pass: {r['delivered_key']}" if r["delivered_key"] else ""
     st_txt = status_label(r["status"], lang)
+    paid_amt = float(r["final_amount"] or r["price"] or 0.0)
+    disc_u = float(r["discount_used_pct"] or 0.0)
+    disc_txt = f" (-{disc_u:.0f}%)" if disc_u > 0 else ""
     lines.append(
         f"#{r['id']} | {r['name']} ({r['duration']}) -"
-        f" ৳{float(r['price']):.0f} [{st_txt}]\n"
+        f" ৳{paid_amt:.0f}{disc_txt} [{st_txt}]\n"
         f"   🕒 {r['created_at']} | Proof: {proof_txt}{key_txt}"
     )
   await message.answer("\n\n".join(lines))
@@ -1185,7 +1237,7 @@ async def btn_my_orders(message: Message):
 @dp.message(F.text.in_(["📞 সাপোর্ট", "📞 Support"]))
 async def btn_support(message: Message):
   admin_states.pop(message.from_user.id, None)
-  _, _, lang, _ = get_user_info(message.from_user.id)
+  _, _, lang, _, _ = get_user_info(message.from_user.id)
   bkash_num, nagad_num = get_payment_numbers()
   msg = (
       f"সাপোর্টের জন্য যোগাযোগ করুন: {SUPPORT_HANDLE}\n"
@@ -1195,6 +1247,52 @@ async def btn_support(message: Message):
       f"bKash: {bkash_num} | Nagad: {nagad_num}"
   )
   await message.answer(msg)
+
+
+def finalize_order_approval(oid: int, key_val: str):
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute(
+      """
+        SELECT o.id, o.user_id, o.plan_id, o.discount_used_pct, o.status
+        FROM orders o
+        WHERE o.id = ?
+        """,
+      (oid,),
+  )
+  row = cur.fetchone()
+  if not row:
+    conn.close()
+    return None
+
+  target_uid = row["user_id"]
+  plid = row["plan_id"]
+  disc_used = float(row["discount_used_pct"] or 0.0)
+  already_approved = row["status"] == "approved"
+
+  cur.execute(
+      "UPDATE orders SET delivered_key = ?, status = 'approved' WHERE id = ?",
+      (key_val, oid),
+  )
+  if not already_approved:
+    cur.execute(
+        "UPDATE plans SET stock = CASE WHEN stock > 0 THEN stock - 1 ELSE 0"
+        " END WHERE id = ?",
+        (plid,),
+    )
+    if disc_used > 0:
+      cur.execute(
+          """
+                UPDATE users
+                SET discount_pct = MAX(0.0, ROUND(discount_pct - ?, 2))
+                WHERE user_id = ?
+                """,
+          (disc_used, target_uid),
+      )
+
+  conn.commit()
+  conn.close()
+  return target_uid
 
 
 @dp.message(Command("key"))
@@ -1212,36 +1310,24 @@ async def cmd_admin_key(message: Message):
   conn = get_conn()
   cur = conn.cursor()
   if target_oid:
-    cur.execute(
-        "SELECT id, user_id, plan_id, status FROM orders WHERE id = ?",
-        (target_oid,),
-    )
+    cur.execute("SELECT id FROM orders WHERE id = ?", (target_oid,))
   else:
     cur.execute(
-        "SELECT id, user_id, plan_id, status FROM orders WHERE status ="
-        " 'pending' ORDER BY id DESC LIMIT 1"
+        "SELECT id FROM orders WHERE status = 'pending' ORDER BY id DESC LIMIT"
+        " 1"
     )
   row = cur.fetchone()
+  conn.close()
+
   if not row:
-    conn.close()
-    await message.answer("কোনো Pending পাসওয়ার্ড/কি রিকোয়েস্ট পাওয়া যায়নি।")
+    await message.answer("কোনো Pending অর্ডার পাওয়া যায়নি।")
     return
 
   oid = row["id"]
-  target_uid = row["user_id"]
-  plid = row["plan_id"]
-
-  cur.execute(
-      "UPDATE orders SET delivered_key = ?, status = 'approved' WHERE id = ?",
-      (key_val, oid),
-  )
-  cur.execute(
-      "UPDATE plans SET stock = CASE WHEN stock > 0 THEN stock - 1 ELSE 0 END"
-      " WHERE id = ?",
-      (plid,),
-  )
-  conn.commit()
-  conn.close()
+  target_uid = finalize_order_approval(oid, key_val)
+  if not target_uid:
+    await message.answer("অর্ডার পাওয়া যায়নি।")
+    return
 
   if admin_states.get(ADMIN_ID, {}).get("order_id") == oid:
     admin_states.pop(ADMIN_ID, None)
@@ -1259,83 +1345,6 @@ async def cmd_admin_key(message: Message):
   )
 
 
-@dp.message(Command("balance"))
-async def cmd_admin_balance(message: Message):
-  if message.from_user.id != ADMIN_ID:
-    return
-  parts = (message.text or "").strip().split()
-  if len(parts) < 2:
-    await message.answer("ব্যবহার: /balance 200")
-    return
-
-  try:
-    amt = float(parts[1])
-    if amt <= 0:
-      raise ValueError()
-  except ValueError:
-    await message.answer("সঠিক সংখ্যা লিখুন। উদাহরণ: /balance 200")
-    return
-
-  target_bid = admin_states.get(ADMIN_ID, {}).get("bal_req_id")
-
-  conn = get_conn()
-  cur = conn.cursor()
-  if target_bid:
-    cur.execute(
-        "SELECT id, user_id, status FROM balance_requests WHERE id = ?",
-        (target_bid,),
-    )
-  else:
-    cur.execute(
-        "SELECT id, user_id, status FROM balance_requests WHERE status ="
-        " 'pending' ORDER BY id DESC LIMIT 1"
-    )
-  row = cur.fetchone()
-  if not row:
-    conn.close()
-    await message.answer("কোনো Pending ব্যালেন্স রিকোয়েস্ট পাওয়া যায়নি।")
-    return
-
-  bid = row["id"]
-  target_uid = row["user_id"]
-
-  cur.execute("SELECT balance FROM users WHERE user_id = ?", (target_uid,))
-  urow = cur.fetchone()
-  if not urow:
-    conn.close()
-    await message.answer("ইউজার পাওয়া যায়নি।")
-    return
-
-  new_bal = float(urow["balance"] or 0.0) + amt
-  cur.execute(
-      "UPDATE users SET balance = ? WHERE user_id = ?", (new_bal, target_uid)
-  )
-  cur.execute(
-      "UPDATE balance_requests SET status = 'approved' WHERE id = ?", (bid,)
-  )
-  conn.commit()
-  conn.close()
-
-  if admin_states.get(ADMIN_ID, {}).get("bal_req_id") == bid:
-    admin_states.pop(ADMIN_ID, None)
-
-  try:
-    await bot.send_message(
-        target_uid,
-        f"✅ আপনার ব্যালেন্স রিকোয়েস্ট #{bid} এপ্রুভ হয়েছে!\n"
-        f"💰 যোগ হয়েছে: ৳{amt:.2f}\n"
-        f"💵 নতুন ব্যালেন্স: ৳{new_bal:.2f}",
-    )
-  except Exception:
-    pass
-
-  await message.answer(
-      f"✅ Balance Request #{bid} APPROVED!\n"
-      f"👤 User: {target_uid} | +৳{amt:.2f}\n"
-      f"💰 New Balance: ৳{new_bal:.2f}"
-  )
-
-
 @dp.message(F.text == "🛠 Admin Panel")
 async def btn_admin_panel(message: Message):
   if message.from_user.id != ADMIN_ID:
@@ -1349,19 +1358,12 @@ async def btn_admin_panel(message: Message):
   p_cnt = cur.fetchone()["cnt"]
   cur.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status = 'pending'")
   o_cnt = cur.fetchone()["cnt"]
-  cur.execute(
-      "SELECT COUNT(*) AS cnt FROM balance_requests WHERE status = 'pending'"
-  )
-  b_cnt = cur.fetchone()["cnt"]
-  cur.execute("SELECT COALESCE(SUM(balance), 0) AS tot FROM users")
-  tot_bal = float(cur.fetchone()["tot"] or 0.0)
   conn.close()
 
   await message.answer(
       f"🛠 Admin Control ({SUPPORT_HANDLE})\n"
       f"👥 Users: {u_cnt} | 📦 Products: {p_cnt}\n"
-      f"⏳ Pending Orders: {o_cnt} | 💳 Bal Reqs: {b_cnt}\n"
-      f"💰 Total User Bal: ৳{tot_bal:.2f}",
+      f"⏳ Pending Orders: {o_cnt}",
       reply_markup=admin_panel_kb(),
   )
 
@@ -1375,20 +1377,12 @@ async def cb_adm_report(callback: CallbackQuery):
   cur = conn.cursor()
 
   cur.execute("""
-        SELECT COUNT(*) AS cnt, COALESCE(SUM(pl.price), 0) AS amt
+        SELECT COUNT(*) AS cnt, COALESCE(SUM(COALESCE(NULLIF(o.final_amount, 0), pl.price)), 0) AS amt
         FROM orders o
         JOIN plans pl ON o.plan_id = pl.id
         WHERE o.status = 'approved'
         """)
   app_ord = cur.fetchone()
-
-  cur.execute("""
-        SELECT COUNT(*) AS cnt, COALESCE(SUM(pl.price), 0) AS amt
-        FROM orders o
-        JOIN plans pl ON o.plan_id = pl.id
-        WHERE o.status = 'approved' AND o.trx_id = 'BALANCE_KEY_REQ'
-        """)
-  bal_ord = cur.fetchone()
 
   cur.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status = 'pending'")
   pend_ord = cur.fetchone()["cnt"]
@@ -1396,36 +1390,14 @@ async def cb_adm_report(callback: CallbackQuery):
   cur.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status = 'rejected'")
   rej_ord = cur.fetchone()["cnt"]
 
-  cur.execute("""
-        SELECT COUNT(*) AS cnt, COALESCE(SUM(requested_amount), 0) AS amt
-        FROM balance_requests
-        WHERE status = 'approved'
-        """)
-  app_bal_req = cur.fetchone()
-
-  cur.execute(
-      "SELECT COUNT(*) AS cnt FROM balance_requests WHERE status = 'pending'"
-  )
-  pend_bal_req = cur.fetchone()["cnt"]
-
   conn.close()
 
-  total_approved_sales = float(app_ord["amt"] or 0.0)
-  bal_key_sales = float(bal_ord["amt"] or 0.0)
-  direct_key_sales = max(0.0, total_approved_sales - bal_key_sales)
-  total_added_bal = float(app_bal_req["amt"] or 0.0)
-
+  total_sales = float(app_ord["amt"] or 0.0)
   report_txt = (
-      f"📊 সেলস ও ব্যালেন্স রিপোর্ট\n\n"
-      f"🛒 কি / অর্ডার:\n"
-      f"• এপ্রুভড অর্ডার: {app_ord['cnt']} টি (৳{total_approved_sales:.0f})\n"
-      f"  — ডাইরেক্ট পেমেন্টে কি: ৳{direct_key_sales:.0f}\n"
-      f"  — ব্যালেন্স টাকায় কি: {bal_ord['cnt']} টি (৳{bal_key_sales:.0f})\n"
+      f"📊 সেলস রিপোর্ট\n\n"
+      f"• এপ্রুভড অর্ডার: {app_ord['cnt']} টি (৳{total_sales:.0f})\n"
       f"• পেন্ডিং অর্ডার: {pend_ord} টি\n"
-      f"• রিজেক্টেড অর্ডার: {rej_ord} টি\n\n"
-      f"💳 ব্যালেন্স রিকোয়েস্ট:\n"
-      f"• এপ্রুভড ব্যালেন্স যোগ: {app_bal_req['cnt']} টি (৳{total_added_bal:.0f})\n"
-      f"• পেন্ডিং ব্যালেন্স রিকোয়েস্ট: {pend_bal_req} টি"
+      f"• রিজেক্টেড অর্ডার: {rej_ord} টি"
   )
   await callback.message.answer(report_txt)
   await callback.answer()
@@ -1468,55 +1440,6 @@ async def cb_adm_lookup(callback: CallbackQuery):
   await callback.answer()
 
 
-@dp.callback_query(F.data == "adm_balreqs")
-async def cb_adm_balreqs(callback: CallbackQuery):
-  if callback.from_user.id != ADMIN_ID:
-    return
-  conn = get_conn()
-  cur = conn.cursor()
-  cur.execute("""
-        SELECT b.id, b.user_id, b.requested_amount, b.proof_text, b.proof_photo_id, b.created_at,
-               u.full_name, u.username, u.balance
-        FROM balance_requests b
-        LEFT JOIN users u ON b.user_id = u.user_id
-        WHERE b.status = 'pending'
-        ORDER BY b.id DESC LIMIT 10
-        """)
-  rows = cur.fetchall()
-  conn.close()
-
-  if not rows:
-    await callback.message.answer("কোনো Pending ব্যালেন্স রিকোয়েস্ট নেই।")
-    await callback.answer()
-    return
-
-  for r in rows:
-    uname = r["username"] or "N/A"
-    fname = r["full_name"] or "User"
-    cur_bal = float(r["balance"] or 0.0)
-    info_line = f"\n🧾 Info: {r['proof_text']}" if r["proof_text"] else ""
-    caption_txt = (
-        f"💳 [PENDING BALANCE REQ] #{r['id']}\n"
-        f"🕒 Time: {r['created_at']}\n"
-        f"👤 User: {fname} ({uname}) | ID: {r['user_id']}\n"
-        f"💰 Current Bal: ৳{cur_bal:.2f} | Requested:"
-        f" ৳{float(r['requested_amount']):.0f}{info_line}\n\n"
-        f"লিখুন: /balance {float(r['requested_amount']):.0f}"
-    )
-    if r["proof_photo_id"]:
-      await callback.message.answer_photo(
-          photo=r["proof_photo_id"],
-          caption=caption_txt,
-          reply_markup=bal_req_kb(r["id"]),
-      )
-    else:
-      await callback.message.answer(
-          caption_txt,
-          reply_markup=bal_req_kb(r["id"]),
-      )
-  await callback.answer()
-
-
 @dp.callback_query(F.data == "adm_users")
 async def cb_adm_users(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
@@ -1524,8 +1447,8 @@ async def cb_adm_users(callback: CallbackQuery):
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
-      "SELECT user_id, full_name, username, balance, joined_at FROM users"
-      " ORDER BY user_id DESC LIMIT 15"
+      "SELECT user_id, full_name, username, discount_pct, referral_count,"
+      " joined_at FROM users ORDER BY user_id DESC LIMIT 15"
   )
   rows = cur.fetchall()
   cur.execute("SELECT COUNT(*) AS cnt FROM users")
@@ -1541,7 +1464,8 @@ async def cb_adm_users(callback: CallbackQuery):
   for r in rows:
     lines.append(
         f"• {r['user_id']} | {r['full_name']} ({r['username']}) | "
-        f"💰 ৳{float(r['balance'] or 0):.2f} | 🕒 {r['joined_at']}"
+        f"🎁 {float(r['discount_pct'] or 0):.0f}% (Refs:"
+        f" {int(r['referral_count'] or 0)}) | 🕒 {r['joined_at']}"
     )
   await callback.message.answer("\n".join(lines))
   await callback.answer()
@@ -1553,21 +1477,6 @@ async def cb_adm_broadcast(callback: CallbackQuery):
     return
   admin_states[callback.from_user.id] = {"step": "broadcast"}
   await callback.message.answer("সব ইউজারকে পাঠানোর মেসেজটি লিখুন:")
-  await callback.answer()
-
-
-@dp.callback_query(F.data.in_(["adm_bal_plus", "adm_bal_minus"]))
-async def cb_adm_balance_mode(callback: CallbackQuery):
-  if callback.from_user.id != ADMIN_ID:
-    return
-  mode = "plus" if callback.data == "adm_bal_plus" else "minus"
-  admin_states[callback.from_user.id] = {"step": "edit_balance", "mode": mode}
-  sign = "+" if mode == "plus" else "-"
-  await callback.message.answer(
-      f"ব্যালেন্স ({sign}) করতে লিখুন:\n"
-      f"UserID | Amount\n"
-      f"উদাহরণ: 5882761122 | 250"
-  )
   await callback.answer()
 
 
@@ -1630,13 +1539,12 @@ async def cb_adm_addplan(callback: CallbackQuery):
   admin_states[callback.from_user.id] = {"step": "add_plan_loop"}
   await callback.message.answer(
       f"প্রোডাক্ট লিস্ট:\n{plist}\n\n"
-      f"একসাথে একাধিক বা সিরিয়াল বাই সিরিয়াল প্ল্যান/দিন যোগ করতে লিখুন:\n"
+      f"প্ল্যান যোগ করতে লিখুন:\n"
       f"ProductID | Duration | SitePrice | Offer(ঐচ্ছিক)\n"
       f"উদাহরণ:\n"
-      f"12 | 1 Hour | 10\n"
-      f"12 | 3 Hour | 25\n"
-      f"12 | 3 Days | 300 | (1 Day 1 Key Free)\n\n"
-      f"এক মেসেজে অনেকগুলো লাইন একসাথে পাঠাতে পারবেন। বের হতে /start দিন।"
+      f"2 | 7 Days | 300\n"
+      f"2 | 30 Days | 700 | (1 Day Free)\n\n"
+      f"বের হতে /start দিন।"
   )
   await callback.answer()
 
@@ -1668,9 +1576,7 @@ async def cb_adm_delplan(callback: CallbackQuery):
   admin_states[callback.from_user.id] = {"step": "del_plan_loop"}
   await callback.message.answer(
       f"সব প্ল্যান লিস্ট:\n{plan_lines}\n\n"
-      f"যে প্ল্যান রিমুভ করতে চান তার PlanID লিখে পাঠান (সিরিয়াল বাই সিরিয়ালও"
-      f" দিতে পারবেন):\n"
-      f"উদাহরণ: 5"
+      f"যে প্ল্যান রিমুভ করতে চান তার PlanID লিখে পাঠান (বের হতে /start দিন):"
   )
   await callback.answer()
 
@@ -1750,8 +1656,9 @@ async def cb_adm_orders(callback: CallbackQuery):
   conn = get_conn()
   cur = conn.cursor()
   cur.execute("""
-        SELECT o.id, o.user_id, p.name, pl.duration, pl.price, o.sender_number,
-               o.trx_id, o.proof_photo_id, pl.bonus, o.created_at
+        SELECT o.id, o.user_id, p.name, pl.duration, pl.price, o.final_amount,
+               o.discount_used_pct, o.sender_number, o.trx_id, o.proof_photo_id,
+               pl.bonus, o.created_at
         FROM orders o
         JOIN plans pl ON o.plan_id = pl.id
         JOIN products p ON pl.product_id = p.id
@@ -1762,25 +1669,25 @@ async def cb_adm_orders(callback: CallbackQuery):
   conn.close()
 
   if not rows:
-    await callback.message.answer("কোনো Pending পাসওয়ার্ড অর্ডার নেই।")
+    await callback.message.answer("কোনো Pending অর্ডার নেই।")
     await callback.answer()
     return
 
   for r in rows:
     offer_txt = f"\n🎁 Offer: {r['bonus']}" if r["bonus"] else ""
     proof_val = r["trx_id"] or r["sender_number"]
-    if proof_val == "BALANCE_KEY_REQ":
-      proof_line = "\n💰 সোর্স: ব্যালেন্স টাকায় কি রিকোয়েস্ট"
-    elif proof_val:
-      proof_line = f"\n🧾 Info: {proof_val}"
-    else:
-      proof_line = "\n📸 Proof: Screenshot"
+    proof_line = (
+        f"\n🧾 Info: {proof_val}" if proof_val else "\n📸 Proof: Screenshot"
+    )
+    paid_amt = float(r["final_amount"] or r["price"] or 0.0)
+    disc_u = float(r["discount_used_pct"] or 0.0)
+    disc_line = f"\n🎁 Discount Used: {disc_u:.0f}%" if disc_u > 0 else ""
 
     caption_txt = (
         f"🔑 [PASSWORD REQUEST] Order #{r['id']} | User: {r['user_id']}\n"
         f"🕒 Time: {r['created_at']}\n"
         f"📦 প্যানেল / প্রোডাক্ট: {r['name']} ({r['duration']}) -"
-        f" ৳{float(r['price']):.0f}{offer_txt}{proof_line}\n\n"
+        f" ৳{paid_amt:.0f}{disc_line}{offer_txt}{proof_line}\n\n"
         f"লিখুন: /key XXXXXXXXXXXXX"
     )
     if r["proof_photo_id"]:
@@ -1822,94 +1729,25 @@ async def cb_order_reject(callback: CallbackQuery):
 
   conn = get_conn()
   cur = conn.cursor()
-  cur.execute(
-      """
-        SELECT o.user_id, o.trx_id, o.status, pl.price
-        FROM orders o
-        JOIN plans pl ON o.plan_id = pl.id
-        WHERE o.id = ?
-        """,
-      (oid,),
-  )
+  cur.execute("SELECT user_id, status FROM orders WHERE id = ?", (oid,))
   row = cur.fetchone()
-  refund_msg = ""
   if row and row["status"] != "rejected":
     uid = row["user_id"]
-    price = float(row["price"] or 0.0)
-    is_bal_order = (row["trx_id"] or "") == "BALANCE_KEY_REQ"
-
     cur.execute("UPDATE orders SET status = 'rejected' WHERE id = ?", (oid,))
-    if is_bal_order and price > 0:
-      cur.execute(
-          "UPDATE users SET balance = balance + ? WHERE user_id = ?", (price, uid)
-      )
-      refund_msg = f"\n💰 ব্যালেন্স থেকে কাটা ৳{price:.0f} ফেরত দেওয়া হয়েছে।"
     conn.commit()
     try:
       await bot.send_message(
           uid,
-          f"❌ আপনার অর্ডার #{oid} রিজেক্ট করা হয়েছে।{refund_msg}",
+          f"❌ আপনার অর্ডার #{oid} রিজেক্ট করা হয়েছে।",
       )
     except Exception:
       pass
   conn.close()
 
   try:
-    await callback.message.edit_text(
-        f"❌ Order #{oid} marked as REJECTED.{refund_msg}"
-    )
+    await callback.message.edit_text(f"❌ Order #{oid} marked as REJECTED.")
   except Exception:
-    await callback.message.answer(
-        f"❌ Order #{oid} marked as REJECTED.{refund_msg}"
-    )
-  await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("reqbal_"))
-async def cb_req_balance_approve(callback: CallbackQuery):
-  if callback.from_user.id != ADMIN_ID:
-    return
-  bid = int(callback.data.split("_", 1)[1])
-  admin_states[callback.from_user.id] = {
-      "step": "wait_bal_approve_amt",
-      "bal_req_id": bid,
-  }
-  await callback.message.answer(
-      f"💰 Balance Request #{bid} এপ্রুভ করতে লিখুন:\n"
-      f"/balance 200\n"
-      f"(অথবা শুধু সংখ্যা লিখেও পাঠাতে পারেন)"
-  )
-  await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("rejbal_"))
-async def cb_rej_balance(callback: CallbackQuery):
-  if callback.from_user.id != ADMIN_ID:
-    return
-  bid = int(callback.data.split("_", 1)[1])
-
-  conn = get_conn()
-  cur = conn.cursor()
-  cur.execute("SELECT user_id FROM balance_requests WHERE id = ?", (bid,))
-  row = cur.fetchone()
-  if row:
-    uid = row["user_id"]
-    cur.execute(
-        "UPDATE balance_requests SET status = 'rejected' WHERE id = ?", (bid,)
-    )
-    conn.commit()
-    try:
-      await bot.send_message(
-          uid, f"❌ আপনার ব্যালেন্স রিকোয়েস্ট #{bid} রিজেক্ট করা হয়েছে।"
-      )
-    except Exception:
-      pass
-  conn.close()
-
-  try:
-    await callback.message.edit_text(f"❌ Balance Request #{bid} REJECTED.")
-  except Exception:
-    await callback.message.answer(f"❌ Balance Request #{bid} REJECTED.")
+    await callback.message.answer(f"❌ Order #{oid} marked as REJECTED.")
   await callback.answer()
 
 
@@ -1943,8 +1781,8 @@ async def handle_messages(message: Message):
       conn = get_conn()
       cur = conn.cursor()
       cur.execute(
-          "SELECT full_name, username, balance, joined_at FROM users WHERE"
-          " user_id = ?",
+          "SELECT full_name, username, discount_pct, referral_count, joined_at"
+          " FROM users WHERE user_id = ?",
           (target_uid,),
       )
       urow = cur.fetchone()
@@ -1965,12 +1803,6 @@ async def handle_messages(message: Message):
           (target_uid,),
       )
       pend_o = cur.fetchone()["cnt"]
-      cur.execute(
-          "SELECT COUNT(*) AS cnt FROM balance_requests WHERE user_id = ? AND"
-          " status = 'approved'",
-          (target_uid,),
-      )
-      app_b = cur.fetchone()["cnt"]
       conn.close()
       admin_states.pop(uid, None)
 
@@ -1978,10 +1810,10 @@ async def handle_messages(message: Message):
           f"🔎 ইউজার তথ্য:\n"
           f"• ID: {target_uid}\n"
           f"• নাম: {urow['full_name']} ({urow['username']})\n"
-          f"• ব্যালেন্স: ৳{float(urow['balance'] or 0):.2f}\n"
+          f"• রেফার: {int(urow['referral_count'] or 0)} | ডিসকাউন্ট:"
+          f" {float(urow['discount_pct'] or 0):.0f}%\n"
           f"• জয়েন: {urow['joined_at']}\n"
-          f"• এপ্রুভড অর্ডার: {app_o} | পেন্ডিং অর্ডার: {pend_o}\n"
-          f"• এপ্রুভড ব্যালেন্স যোগ: {app_b}"
+          f"• এপ্রুভড অর্ডার: {app_o} | পেন্ডিং অর্ডার: {pend_o}"
       )
       return
 
@@ -1995,31 +1827,12 @@ async def handle_messages(message: Message):
           else txt
       )
       oid = state["order_id"]
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute("SELECT user_id, plan_id FROM orders WHERE id = ?", (oid,))
-      row = cur.fetchone()
-      if not row:
-        conn.close()
-        admin_states.pop(uid, None)
+      target_uid = finalize_order_approval(oid, key_val)
+      admin_states.pop(uid, None)
+
+      if not target_uid:
         await message.answer("অর্ডার পাওয়া যায়নি।")
         return
-
-      target_uid = row["user_id"]
-      plid = row["plan_id"]
-      cur.execute(
-          "UPDATE orders SET delivered_key = ?, status = 'approved' WHERE id ="
-          " ?",
-          (key_val, oid),
-      )
-      cur.execute(
-          "UPDATE plans SET stock = CASE WHEN stock > 0 THEN stock - 1 ELSE 0"
-          " END WHERE id = ?",
-          (plid,),
-      )
-      conn.commit()
-      conn.close()
-      admin_states.pop(uid, None)
 
       try:
         await bot.send_message(
@@ -2031,116 +1844,6 @@ async def handle_messages(message: Message):
 
       await message.answer(
           f"✅ Order #{oid} APPROVED!\n🔑 Sent Key/Password: {key_val}"
-      )
-      return
-
-    elif step == "wait_bal_approve_amt":
-      raw_amt = (
-          txt.split(maxsplit=1)[1].strip()
-          if txt.lower().startswith("/balance ")
-          else txt
-      )
-      try:
-        amt = float(raw_amt)
-        if amt <= 0:
-          raise ValueError()
-      except ValueError:
-        await message.answer("সঠিক সংখ্যা লিখুন। উদাহরণ: /balance 200")
-        return
-
-      bid = state["bal_req_id"]
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute(
-          "SELECT user_id FROM balance_requests WHERE id = ?", (bid,)
-      )
-      row = cur.fetchone()
-      if not row:
-        conn.close()
-        admin_states.pop(uid, None)
-        await message.answer("ব্যালেন্স রিকোয়েস্ট পাওয়া যায়নি।")
-        return
-
-      target_uid = row["user_id"]
-      cur.execute("SELECT balance FROM users WHERE user_id = ?", (target_uid,))
-      urow = cur.fetchone()
-      if not urow:
-        conn.close()
-        admin_states.pop(uid, None)
-        await message.answer("ইউজার পাওয়া যায়নি।")
-        return
-
-      new_bal = float(urow["balance"] or 0.0) + amt
-      cur.execute(
-          "UPDATE users SET balance = ? WHERE user_id = ?", (new_bal, target_uid)
-      )
-      cur.execute(
-          "UPDATE balance_requests SET status = 'approved' WHERE id = ?", (bid,)
-      )
-      conn.commit()
-      conn.close()
-      admin_states.pop(uid, None)
-
-      try:
-        await bot.send_message(
-            target_uid,
-            f"✅ আপনার ব্যালেন্স রিকোয়েস্ট #{bid} এপ্রুভ হয়েছে!\n"
-            f"💰 যোগ হয়েছে: ৳{amt:.2f}\n"
-            f"💵 নতুন ব্যালেন্স: ৳{new_bal:.2f}",
-        )
-      except Exception:
-        pass
-
-      await message.answer(
-          f"✅ Balance Request #{bid} APPROVED!\n"
-          f"👤 User: {target_uid} | +৳{amt:.2f}\n"
-          f"💰 New Balance: ৳{new_bal:.2f}"
-      )
-      return
-
-    elif step == "edit_balance":
-      mode = state.get("mode", "plus")
-      if "|" not in txt:
-        await message.answer("ফরম্যাট: UserID | Amount")
-        return
-      u_str, amt_str = [x.strip() for x in txt.split("|", 1)]
-      try:
-        target_uid = int(u_str)
-        amt = float(amt_str)
-        if amt <= 0:
-          raise ValueError()
-      except ValueError:
-        await message.answer("সঠিক UserID এবং ধনাত্মক Amount দিন।")
-        return
-
-      delta = amt if mode == "plus" else -amt
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute("SELECT balance FROM users WHERE user_id = ?", (target_uid,))
-      urow = cur.fetchone()
-      if not urow:
-        conn.close()
-        await message.answer("এই UserID ডেটাবেসে পাওয়া যায়নি।")
-        return
-      new_bal = max(0.0, float(urow["balance"] or 0.0) + delta)
-      cur.execute(
-          "UPDATE users SET balance = ? WHERE user_id = ?", (new_bal, target_uid)
-      )
-      conn.commit()
-      conn.close()
-      admin_states.pop(uid, None)
-
-      try:
-        sign_txt = f"+৳{amt:.2f}" if mode == "plus" else f"-৳{amt:.2f}"
-        await bot.send_message(
-            target_uid,
-            f"💰 ব্যালেন্স আপডেট ({sign_txt})\nনতুন ব্যালেন্স: ৳{new_bal:.2f}",
-        )
-      except Exception:
-        pass
-
-      await message.answer(
-          f"✅ User {target_uid} ব্যালেন্স আপডেট হয়েছে: ৳{new_bal:.2f}"
       )
       return
 
@@ -2184,12 +1887,6 @@ async def handle_messages(message: Message):
           (pname, cat_val),
       )
       pid = cur.lastrowid
-      if DEFAULT_PLANS:
-        cur.executemany(
-            "INSERT INTO plans (product_id, duration, price, stock, bonus)"
-            " VALUES (?, ?, ?, ?, ?)",
-            [(pid, dur, pr, st, bon) for dur, pr, st, bon in DEFAULT_PLANS],
-        )
       conn.commit()
       conn.close()
       admin_states.pop(uid, None)
@@ -2231,8 +1928,7 @@ async def handle_messages(message: Message):
       if not lines:
         await message.answer(
             "ফরম্যাট ভুল! লিখুন:\n"
-            "ProductID | Duration | SitePrice | Offer(ঐচ্ছিক)\n"
-            "উদাহরণ: 12 | 1 Hour | 10"
+            "ProductID | Duration | SitePrice | Offer(ঐচ্ছিক)"
         )
         return
 
@@ -2272,14 +1968,15 @@ async def handle_messages(message: Message):
           )
           continue
 
-        brand_price = calc_brand_price(site_price)
+        pname = prow["name"]
+        brand_price = calc_brand_price(site_price, pname)
         cur.execute(
             "INSERT INTO plans (product_id, duration, price, stock, bonus)"
             " VALUES (?, ?, ?, 20, ?)",
             (pid, dur, brand_price, bonus),
         )
         added_items.append(
-            f"• {prow['name']} — {dur} | সাইট ৳{site_price:.0f} → ব্র্যান্ড"
+            f"• {pname} — {dur} | সাইট ৳{site_price:.0f} → প্রাইস"
             f" ৳{brand_price:.0f}{format_bonus_bracket(bonus)}"
         )
 
@@ -2297,10 +1994,7 @@ async def handle_messages(message: Message):
             "⚠️ যে লাইনগুলো যোগ হয়নি:\n" + "\n".join(failed_items)
         )
 
-      reply_parts.append(
-          "\nআরও প্ল্যান পাঠাতে চাইলে একসাথে বা একটার পর একটা লিখে পাঠান (বের হতে"
-          " /start দিন):"
-      )
+      reply_parts.append("\nআরও প্ল্যান পাঠান অথবা বের হতে /start দিন:")
       await message.answer("\n\n".join(reply_parts), parse_mode=None)
       return
 
@@ -2334,7 +2028,7 @@ async def handle_messages(message: Message):
       await message.answer(
           f"🗑 Plan #{plid} ({prow['name']} - {prow['duration']} -"
           f" ৳{float(prow['price']):.0f}) রিমুভ হয়েছে।\n"
-          f"আরও প্ল্যান রিমুভ করতে চাইলে PlanID লিখুন (অথবা বের হতে /start দিন):"
+          f"আরও PlanID লিখুন অথবা বের হতে /start দিন:"
       )
       return
 
@@ -2345,9 +2039,8 @@ async def handle_messages(message: Message):
         return
       try:
         plid = int(parts[0])
-        new_price = round_to_0_or_5(float(parts[1]))
         new_stock = int(parts[2]) if len(parts) >= 3 and parts[2] else None
-        if new_price <= 0 or (new_stock is not None and new_stock < 0):
+        if new_stock is not None and new_stock < 0:
           raise ValueError()
       except ValueError:
         await message.answer("সঠিক সংখ্যা লিখুন (যেমন: 3 | 120 | 25):")
@@ -2355,12 +2048,35 @@ async def handle_messages(message: Message):
 
       conn = get_conn()
       cur = conn.cursor()
-      cur.execute("SELECT id, duration FROM plans WHERE id = ?", (plid,))
+      cur.execute(
+          """
+                SELECT pl.id, pl.duration, pl.price, p.name
+                FROM plans pl
+                JOIN products p ON pl.product_id = p.id
+                WHERE pl.id = ?
+                """,
+          (plid,),
+      )
       prow = cur.fetchone()
       if not prow:
         conn.close()
         await message.answer("এই PlanID পাওয়া যায়নি।")
         return
+
+      try:
+        raw_p = float(parts[1])
+        if raw_p <= 0:
+          raise ValueError()
+      except ValueError:
+        conn.close()
+        await message.answer("সঠিক দাম লিখুন।")
+        return
+
+      new_price = (
+          round_to_0_or_5(raw_p)
+          if is_dolphin_product(prow["name"])
+          else round_to_0_or_5(raw_p)
+      )
 
       if new_stock is not None:
         cur.execute(
@@ -2409,181 +2125,10 @@ async def handle_messages(message: Message):
 
   if uid in user_states:
     ustate = user_states[uid]
-    _, _, lang, _ = get_user_info(uid)
+    _, _, lang, _, _ = get_user_info(uid)
     step = ustate.get("step")
 
-    if step == "wait_bal_amount":
-      try:
-        amt = float(txt)
-        if amt <= 0:
-          raise ValueError()
-      except ValueError:
-        await message.answer(
-            "সঠিক টাকার পরিমাণ লিখুন (উদাহরণ: 200):"
-            if lang == "bn"
-            else "Enter a valid amount (Example: 200):"
-        )
-        return
-
-      bkash_num, nagad_num = get_payment_numbers()
-      created = now_str()
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute(
-          """
-                INSERT INTO balance_requests (user_id, requested_amount, status, created_at)
-                VALUES (?, ?, 'pending_payment', ?)
-                """,
-          (uid, amt, created),
-      )
-      bid = cur.lastrowid
-      conn.commit()
-      conn.close()
-
-      user_states[uid] = {
-          "step": "wait_bal_proof",
-          "bal_req_id": bid,
-          "amount": amt,
-          "created_at": created,
-      }
-
-      if lang == "bn":
-        msg = (
-            f"💳 ব্যালেন্স রিকোয়েস্ট #{bid}\n"
-            f"💵 পরিমাণ: ৳{amt:.0f} (Send Money)\n\n"
-            f"📲 পেমেন্ট নম্বর:\n"
-            f"• বিকাশ: {bkash_num}\n"
-            f"• নগদ: {nagad_num}\n\n"
-            f"টাকা পাঠানোর পর যেকোনো ১টা দিন:\n"
-            f"📸 পেমেন্টের স্ক্রিনশট পাঠান\n"
-            f"অথবা\n"
-            f"✍️ সঠিক TrxID / মোবাইল নম্বর লিখে পাঠান"
-        )
-      else:
-        msg = (
-            f"💳 Balance Request #{bid}\n"
-            f"💵 Amount: ৳{amt:.0f} (Send Money)\n\n"
-            f"📲 Payment Numbers:\n"
-            f"• bKash: {bkash_num}\n"
-            f"• Nagad: {nagad_num}\n\n"
-            f"After sending money, send any ONE:\n"
-            f"📸 Payment screenshot\n"
-            f"OR\n"
-            f"✍️ Valid TrxID / mobile number"
-        )
-      await message.answer(msg)
-      return
-
-    elif step == "wait_bal_proof":
-      has_photo = bool(message.photo)
-      valid_txt, cleaned_proof = is_valid_trx_or_proof_text(txt)
-
-      if not has_photo and not valid_txt:
-        bid = ustate["bal_req_id"]
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE balance_requests SET status = 'rejected' WHERE id = ?",
-            (bid,),
-        )
-        conn.commit()
-        conn.close()
-        user_states.pop(uid, None)
-        await message.answer(
-            f"❌ অটো-রিজেক্ট! ব্যালেন্স রিকোয়েস্ট #{bid} বাতিল করা হয়েছে।\n"
-            f"সঠিক TrxID (যেমন: DKG8KD5RIA / 76CLUSN8), ১১ ডিজিটের মোবাইল"
-            f" নম্বর অথবা স্ক্রিনশট দিন।"
-            if lang == "bn"
-            else f"❌ Auto-Rejected! Balance request #{bid} was cancelled.\n"
-            f"Provide a valid TrxID (e.g. DKG8KD5RIA / 76CLUSN8), 11-digit"
-            f" mobile number, or screenshot."
-        )
-        return
-
-      if valid_txt and is_duplicate_proof(cleaned_proof):
-        bid = ustate["bal_req_id"]
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE balance_requests SET status = 'rejected' WHERE id = ?",
-            (bid,),
-        )
-        conn.commit()
-        conn.close()
-        user_states.pop(uid, None)
-        await message.answer(
-            f"❌ ডুপ্লিকেট প্রুফ! ব্যালেন্স রিকোয়েস্ট #{bid} অটো-রিজেক্ট করা"
-            f" হয়েছে।\n"
-            f"এই TrxID বা নম্বরটি আগে ব্যবহার করা হয়েছে।"
-            if lang == "bn"
-            else f"❌ Duplicate proof! Balance request #{bid} was"
-            f" auto-rejected.\n"
-            f"This TrxID or number has already been used."
-        )
-        return
-
-      bid = ustate["bal_req_id"]
-      amt = ustate["amount"]
-      created = ustate["created_at"]
-      photo_id = message.photo[-1].file_id if has_photo else ""
-      proof_text = cleaned_proof if valid_txt else ""
-
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute(
-          """
-                UPDATE balance_requests
-                SET proof_text = ?, proof_photo_id = ?, status = 'pending'
-                WHERE id = ? AND user_id = ?
-                """,
-          (proof_text, photo_id, bid, uid),
-      )
-      conn.commit()
-      conn.close()
-
-      user_states.pop(uid, None)
-
-      await message.answer(
-          f"✅ ব্যালেন্স রিকোয়েস্ট #{bid} জমা হয়েছে!\nঅ্যাডমিন চেক করে ব্যালেন্স"
-          f" যোগ করে দেবেন।"
-          if lang == "bn"
-          else f"✅ Balance request #{bid} submitted!\nAdmin will review and"
-          f" add your balance."
-      )
-
-      full_name, username, _, bal = get_user_info(uid)
-      info_line = f"\n🧾 Info: {proof_text}" if proof_text else ""
-      photo_line = "\n📸 Proof: Screenshot attached" if photo_id else ""
-
-      admin_alert = (
-          f"💳 [BALANCE REQUEST] #{bid}\n"
-          f"🕒 Time: {created}\n"
-          f"👤 User: {full_name} ({username}) | ID: {uid}\n"
-          f"💰 Current Balance: ৳{bal:.2f}\n"
-          f"💵 Requested Amount: ৳{amt:.0f}{info_line}{photo_line}\n\n"
-          f"ব্যালেন্স দিতে লিখুন:\n"
-          f"/balance {amt:.0f}"
-      )
-
-      try:
-        if photo_id:
-          await bot.send_photo(
-              ADMIN_ID,
-              photo=photo_id,
-              caption=admin_alert,
-              reply_markup=bal_req_kb(bid),
-          )
-        else:
-          await bot.send_message(
-              ADMIN_ID,
-              admin_alert,
-              reply_markup=bal_req_kb(bid),
-          )
-      except Exception:
-        pass
-      return
-
-    elif step == "wait_proof":
+    if step == "wait_proof":
       has_photo = bool(message.photo)
       valid_txt, cleaned_proof = is_valid_trx_or_proof_text(txt)
 
@@ -2597,12 +2142,10 @@ async def handle_messages(message: Message):
         user_states.pop(uid, None)
         await message.answer(
             f"❌ অটো-রিজেক্ট! অর্ডার #{oid} বাতিল করা হয়েছে।\n"
-            f"ভুয়া বা অসম্পূর্ণ তথ্য গ্রহণযোগ্য নয়—সঠিক TrxID (যেমন: DKG8KD5RIA"
-            f" / 76CLUSN8), ১১ ডিজিটের মোবাইল নম্বর অথবা স্ক্রিনশট দিন।"
+            f"সঠিক TrxID, ১১ ডিজিটের মোবাইল নম্বর অথবা স্ক্রিনশট দিন।"
             if lang == "bn"
             else f"❌ Auto-Rejected! Order #{oid} was cancelled.\n"
-            f"Invalid proof—send a valid TrxID (e.g. DKG8KD5RIA / 76CLUSN8),"
-            f" 11-digit mobile number, or screenshot."
+            f"Send a valid TrxID, 11-digit mobile number, or screenshot."
         )
         return
 
@@ -2615,18 +2158,17 @@ async def handle_messages(message: Message):
         conn.close()
         user_states.pop(uid, None)
         await message.answer(
-            f"❌ ডুপ্লিকেট প্রুফ! অর্ডার #{oid} অটো-রিজেক্ট করা হয়েছে।\n"
-            f"এই TrxID বা নম্বরটি আগে ব্যবহার করা হয়েছে।"
+            f"❌ ডুপ্লিকেট প্রুফ! অর্ডার #{oid} অটো-রিজেক্ট করা হয়েছে।"
             if lang == "bn"
-            else f"❌ Duplicate proof! Order #{oid} was auto-rejected.\n"
-            f"This TrxID or number has already been used."
+            else f"❌ Duplicate proof! Order #{oid} was auto-rejected."
         )
         return
 
       oid = ustate["order_id"]
       pname = ustate["pname"]
       duration = ustate["duration"]
-      price = ustate["price"]
+      final_price = float(ustate.get("final_price", ustate.get("price", 0.0)))
+      disc_pct = float(ustate.get("discount_pct", 0.0))
       bonus = ustate.get("bonus", "")
       created = ustate.get("created_at", now_str())
 
@@ -2655,8 +2197,14 @@ async def handle_messages(message: Message):
           f" Key / Password."
       )
 
-      full_name, username, _, bal = get_user_info(uid)
+      full_name, username, _, cur_disc, ref_cnt = get_user_info(uid)
       offer_line = f"\n🎁 Offer: {bonus}" if bonus else ""
+      disc_line = (
+          f"\n🎁 Discount Applied: {disc_pct:.0f}% (Saved Bal:"
+          f" {cur_disc:.0f}%, Refs: {ref_cnt})"
+          if disc_pct > 0
+          else ""
+      )
       info_line = f"\n🧾 Info: {proof_text}" if proof_text else ""
       photo_line = "\n📸 Proof: Screenshot attached" if photo_id else ""
 
@@ -2664,9 +2212,8 @@ async def handle_messages(message: Message):
           f"🔑 [PASSWORD REQUEST] Order #{oid}\n"
           f"🕒 Time: {created}\n"
           f"👤 User: {full_name} ({username}) | ID: {uid}\n"
-          f"💰 Balance: ৳{bal:.2f}\n"
           f"📦 প্যানেল / প্রোডাক্ট: {pname} ({duration}) -"
-          f" ৳{price:.0f}{offer_line}{info_line}{photo_line}\n\n"
+          f" ৳{final_price:.0f}{disc_line}{offer_line}{info_line}{photo_line}\n\n"
           f"পাসওয়ার্ড দিতে লিখুন:\n"
           f"/key XXXXXXXXXXXXX"
       )
