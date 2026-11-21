@@ -53,7 +53,30 @@ REMOVED_PRODUCTS = [
     "Br Mod Apk Mod",
     "ANGRY MOOD",
     "DELTA MODZ",
+    "ANGRY MOD - ROOT",
+    "DELTA MOD - ROOT",
+    "ZYTRON PRO - ROOT",
+    "DRIP WIRE EXTERNAL",
+    "BR MOD NON ROOT",
 ]
+
+
+def canon_name(name: str) -> str:
+  s = re.sub(r"\s+", " ", (name or "").strip()).upper()
+  return s
+
+
+def canon_duration(dur: str) -> str:
+  s = re.sub(r"\s+", " ", (dur or "").strip())
+  m = re.fullmatch(r"(\d+)\s*(hours?|hrs?)", s, flags=re.I)
+  if m:
+    n = int(m.group(1))
+    return f"{n} Hour" if n == 1 else f"{n} Hours"
+  m = re.fullmatch(r"(\d+)\s*days?", s, flags=re.I)
+  if m:
+    n = int(m.group(1))
+    return f"{n} Day" if n == 1 else f"{n} Days"
+  return s
 
 
 def round_to_0_or_5(amount: float) -> float:
@@ -131,9 +154,9 @@ def calc_discount_details(
   applied_pct = min(avail_pct, max_cap_pct)
 
   raw_after = price * (1.0 - (applied_pct / 100.0))
-  # কেনা দাম (~0.70x) + সামান্য লাভের সুরক্ষা যেন ডিসকাউন্টে লস না হয়
+  # কেনা দাম (~0.70x) + ন্যূনতম 30% কস্ট-মার্জিন সুরক্ষা যেন ডিসকাউন্টে লস না হয়
   cost_floor = price * 0.70
-  profit_guard = price * 0.75
+  profit_guard = cost_floor * 1.30
   safe_floor = max(cost_floor, profit_guard)
 
   if raw_after < safe_floor:
@@ -166,9 +189,9 @@ RAW_CATALOG = [
         "ROOT",
         [
             ("1 Day", 50.0, 25, "", False),
-            ("7 Day", 280.0, 20, "", False),
-            ("15 Day", 480.0, 15, "", False),
-            ("30 Day", 700.0, 10, "", False),
+            ("7 Days", 280.0, 20, "", False),
+            ("15 Days", 480.0, 15, "", False),
+            ("30 Days", 700.0, 10, "", False),
         ],
     ),
     (
@@ -176,8 +199,8 @@ RAW_CATALOG = [
         "ROOT",
         [
             ("1 Day", 50.0, 25, "", False),
-            ("10 Day", 380.0, 15, "", False),
-            ("30 Day", 680.0, 10, "", False),
+            ("10 Days", 380.0, 15, "", False),
+            ("30 Days", 680.0, 10, "", False),
         ],
     ),
     (
@@ -185,21 +208,21 @@ RAW_CATALOG = [
         "ROOT",
         [
             ("1 Day", 50.0, 25, "", False),
-            ("7 Day", 250.0, 20, "", False),
-            ("15 Day", 450.0, 15, "", False),
-            ("30 Day", 700.0, 10, "", False),
+            ("7 Days", 250.0, 20, "", False),
+            ("15 Days", 450.0, 15, "", False),
+            ("30 Days", 700.0, 10, "", False),
         ],
     ),
     (
         "DRIP WIRE - NON ROOT",
         "NON_ROOT",
         [
-            ("3 Hour", 25.0, 30, "", False),
-            ("6 Hour", 50.0, 30, "", False),
-            ("12 Hour", 80.0, 25, "", False),
+            ("3 Hours", 25.0, 30, "", False),
+            ("6 Hours", 50.0, 30, "", False),
+            ("12 Hours", 80.0, 25, "", False),
             ("1 Day", 120.0, 20, "", False),
-            ("7 Day", 480.0, 15, "", False),
-            ("30 Day", 850.0, 10, "", False),
+            ("7 Days", 480.0, 15, "", False),
+            ("30 Days", 850.0, 10, "", False),
         ],
     ),
     (
@@ -207,9 +230,9 @@ RAW_CATALOG = [
         "ROOT",
         [
             ("1 Day", 70.0, 20, "", False),
-            ("7 Day", 300.0, 20, "", False),
-            ("15 Day", 500.0, 15, "", False),
-            ("30 Day", 800.0, 10, "", False),
+            ("7 Days", 300.0, 20, "", False),
+            ("15 Days", 500.0, 15, "", False),
+            ("30 Days", 800.0, 10, "", False),
         ],
     ),
     (
@@ -217,10 +240,10 @@ RAW_CATALOG = [
         "NON_ROOT",
         [
             ("1 Day", 50.0, 25, "", False),
-            ("3 Day", 100.0, 20, "", False),
-            ("7 Day", 200.0, 20, "", False),
-            ("15 Day", 350.0, 15, "", False),
-            ("30 Day", 580.0, 10, "", False),
+            ("3 Days", 100.0, 20, "", False),
+            ("7 Days", 200.0, 20, "", False),
+            ("15 Days", 350.0, 15, "", False),
+            ("30 Days", 580.0, 10, "", False),
         ],
     ),
     (
@@ -228,8 +251,8 @@ RAW_CATALOG = [
         "PC_LAPTOP",
         [
             ("1 Day", 90.0, 20, "", False),
-            ("10 Day", 280.0, 15, "", False),
-            ("30 Day", 480.0, 10, "", False),
+            ("10 Days", 280.0, 15, "", False),
+            ("30 Days", 480.0, 10, "", False),
         ],
     ),
 ]
@@ -240,7 +263,7 @@ CATALOG_PRODUCTS = [
         cat_key,
         [
             (
-                dur,
+                canon_duration(dur),
                 round_to_0_or_5(pr)
                 if fixed_off
                 else calc_brand_price(pr, pname),
@@ -336,52 +359,79 @@ def is_duplicate_proof(proof_val: str) -> bool:
 
 
 def sync_catalog_prices(cur: sqlite3.Cursor):
-  for rem_name in REMOVED_PRODUCTS:
-    cur.execute(
-        "SELECT id FROM products WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))",
-        (rem_name,),
-    )
-    for r_row in cur.fetchall():
-      cur.execute("DELETE FROM plans WHERE product_id = ?", (r_row["id"],))
-      cur.execute("DELETE FROM products WHERE id = ?", (r_row["id"],))
+  removed_canon = {canon_name(x) for x in REMOVED_PRODUCTS}
+  catalog_map = {canon_name(pname): (pname, cat_key, plist) for pname, cat_key, plist in CATALOG_PRODUCTS}
 
-  for pname, cat_key, plist in CATALOG_PRODUCTS:
-    cur.execute("SELECT id, category FROM products WHERE name = ?", (pname,))
-    prow = cur.fetchone()
-    if not prow:
+  cur.execute("SELECT id, name, category FROM products ORDER BY id")
+  all_prods = cur.fetchall()
+
+  kept_by_canon = {}
+  for prow in all_prods:
+    pid = prow["id"]
+    cname = canon_name(prow["name"])
+    if cname in removed_canon:
+      cur.execute("DELETE FROM plans WHERE product_id = ?", (pid,))
+      cur.execute("DELETE FROM products WHERE id = ?", (pid,))
+      continue
+
+    if cname in catalog_map:
+      target_pname, target_cat, _ = catalog_map[cname]
+      if cname not in kept_by_canon:
+        kept_by_canon[cname] = pid
+        if prow["name"] != target_pname or prow["category"] != target_cat:
+          cur.execute(
+              "UPDATE products SET name = ?, category = ? WHERE id = ?",
+              (target_pname, target_cat, pid),
+          )
+      else:
+        primary_pid = kept_by_canon[cname]
+        cur.execute("UPDATE orders SET plan_id = (SELECT id FROM plans WHERE product_id = ? LIMIT 1) WHERE plan_id IN (SELECT id FROM plans WHERE product_id = ?)", (primary_pid, pid))
+        cur.execute("DELETE FROM plans WHERE product_id = ?", (pid,))
+        cur.execute("DELETE FROM products WHERE id = ?", (pid,))
+
+  for cname, (pname, cat_key, plist) in catalog_map.items():
+    if cname not in kept_by_canon:
       cur.execute(
           "INSERT INTO products (name, category) VALUES (?, ?)",
           (pname, cat_key),
       )
       pid = cur.lastrowid
-      cur.executemany(
-          "INSERT INTO plans (product_id, duration, price, stock, bonus)"
-          " VALUES (?, ?, ?, ?, ?)",
-          [(pid, dur, pr, st, bon) for dur, pr, st, bon in plist],
-      )
+      kept_by_canon[cname] = pid
     else:
-      pid = prow["id"]
-      if prow["category"] != cat_key:
+      pid = kept_by_canon[cname]
+
+    allowed_durs = [canon_duration(dur) for dur, _, _, _ in plist]
+    cur.execute("SELECT id, duration, bonus FROM plans WHERE product_id = ? ORDER BY id", (pid,))
+    existing_plans = cur.fetchall()
+
+    seen_durs = set()
+    for pl in existing_plans:
+      cdur = canon_duration(pl["duration"])
+      if cdur not in allowed_durs or cdur in seen_durs:
+        cur.execute("DELETE FROM plans WHERE id = ?", (pl["id"],))
+      else:
+        seen_durs.add(cdur)
+        if pl["duration"] != cdur:
+          cur.execute("UPDATE plans SET duration = ? WHERE id = ?", (cdur, pl["id"]))
+
+    for dur, pr, st, bon in plist:
+      cdur = canon_duration(dur)
+      cur.execute(
+          "SELECT id FROM plans WHERE product_id = ? AND duration = ? ORDER BY id LIMIT 1",
+          (pid, cdur),
+      )
+      pl_row = cur.fetchone()
+      if pl_row:
         cur.execute(
-            "UPDATE products SET category = ? WHERE id = ?", (cat_key, pid)
+            "UPDATE plans SET price = ? WHERE id = ?",
+            (pr, pl_row["id"]),
         )
-      for dur, pr, st, bon in plist:
+      else:
         cur.execute(
-            "SELECT id FROM plans WHERE product_id = ? AND duration = ?",
-            (pid, dur),
+            "INSERT INTO plans (product_id, duration, price, stock, bonus)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (pid, cdur, pr, st, bon),
         )
-        pl_row = cur.fetchone()
-        if pl_row:
-          cur.execute(
-              "UPDATE plans SET price = ? WHERE id = ?",
-              (pr, pl_row["id"]),
-          )
-        else:
-          cur.execute(
-              "INSERT INTO plans (product_id, duration, price, stock, bonus)"
-              " VALUES (?, ?, ?, ?, ?)",
-              (pid, dur, pr, st, bon),
-          )
 
 
 def init_db():
@@ -999,7 +1049,10 @@ async def cb_select_category(callback: CallbackQuery):
       for row in prods
   ]
   rows.append([
-      InlineKeyboardButton(text="⬅️ ক্যাটাগরি পরিবর্তন", callback_data="back_cats")
+      InlineKeyboardButton(
+          text="⬅️ ক্যাটাগরি পরিবর্তন" if lang == "bn" else "⬅️ Change Category",
+          callback_data="back_cats",
+      )
   ])
 
   header = (
@@ -1948,7 +2001,7 @@ async def handle_messages(message: Message):
 
         try:
           pid = int(parts[0])
-          dur = parts[1]
+          dur = canon_duration(parts[1])
           site_price = float(parts[2])
           bonus = parts[3] if len(parts) >= 4 else ""
           if not dur or site_price <= 0:
@@ -2072,11 +2125,7 @@ async def handle_messages(message: Message):
         await message.answer("সঠিক দাম লিখুন।")
         return
 
-      new_price = (
-          round_to_0_or_5(raw_p)
-          if is_dolphin_product(prow["name"])
-          else round_to_0_or_5(raw_p)
-      )
+      new_price = round_to_0_or_5(raw_p)
 
       if new_stock is not None:
         cur.execute(
