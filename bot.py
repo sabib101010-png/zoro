@@ -20,6 +20,7 @@ BOT_TOKEN = os.getenv(
 )
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8524854849"))
 SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@ZORO_BROTHER")
+WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "01778878676")
 DB_PATH = os.getenv("DB_PATH", "store_v9.db")
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -1445,15 +1446,19 @@ async def btn_my_orders(message: Message):
 async def btn_support(message: Message):
   admin_states.pop(message.from_user.id, None)
   _, _, lang, _, _, _ = get_user_info(message.from_user.id)
-  bkash_num, nagad_num = get_payment_numbers()
-  msg = (
-      f"সাপোর্টের জন্য যোগাযোগ করুন: {SUPPORT_HANDLE}\n"
-      f"বিকাশ: {bkash_num} | নগদ: {nagad_num}"
-      if lang == "bn"
-      else f"Contact for support: {SUPPORT_HANDLE}\n"
-      f"bKash: {bkash_num} | Nagad: {nagad_num}"
-  )
-  await message.answer(msg)
+  if lang == "bn":
+    msg = (
+        f"📞 **সাপোর্ট ও যোগাযোগ**\n\n"
+        f"🔹 **টেলিগ্রাম সাপোর্ট:** **{SUPPORT_HANDLE}**\n"
+        f"🔹 **হোয়াটসঅ্যাপ:** **{WHATSAPP_NUMBER}**"
+    )
+  else:
+    msg = (
+        f"📞 **Support & Contact**\n\n"
+        f"🔹 **Telegram Support:** **{SUPPORT_HANDLE}**\n"
+        f"🔹 **WhatsApp:** **{WHATSAPP_NUMBER}**"
+    )
+  await message.answer(msg, parse_mode="Markdown")
 
 
 def finalize_order_approval(oid: int, key_val: str):
