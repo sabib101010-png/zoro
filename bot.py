@@ -21,6 +21,7 @@ BOT_TOKEN = os.getenv(
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8524854849"))
 SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@ZORO_BROTHER")
 WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "01778878676")
+CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/zoro404ofc")
 DB_PATH = os.getenv("DB_PATH", "store_v9.db")
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -67,6 +68,14 @@ def canon_duration(dur: str) -> str:
   return s
 
 
+def round_to_zero(amount: float) -> float:
+  """সবসময় শেষ অঙ্ক ০ (১০-এর গুণিতক)-তে রাউন্ড করে।"""
+  if amount <= 0:
+    return 0.0
+  snapped = round(float(amount) / 10.0) * 10.0
+  return float(max(10.0, snapped))
+
+
 def round_to_0_or_5(amount: float) -> float:
   if amount <= 0:
     return 0.0
@@ -78,31 +87,23 @@ def is_dolphin_product(pname: str) -> bool:
   return "dolphin" in (pname or "").strip().lower()
 
 
-def is_thirty_days_plan(duration: str) -> bool:
-  s = (duration or "").strip().lower()
-  m = re.search(r"(\d+)\s*day", s)
-  if not m:
-    return False
-  return int(m.group(1)) >= 30
+def is_angry_product(pname: str) -> bool:
+  return "angry" in (pname or "").strip().lower()
 
 
-def is_three_days_or_more(duration: str) -> bool:
+def parse_days_count(duration: str) -> int:
   s = (duration or "").strip().lower()
   if "hour" in s or "hr" in s:
-    return False
+    return 0
   m = re.search(r"(\d+)\s*day", s)
   if not m:
-    return False
-  return int(m.group(1)) >= 3
+    return 0
+  return int(m.group(1))
 
 
 def calc_brand_price(
     site_price: float, pname: str = "", duration: str = ""
 ) -> float:
-  """
-    - Dolphin প্যানেলে দাম অপরিবর্তিত থাকে
-    - সাধারণ প্ল্যানগুলোতে শেষ অঙ্ক ০ বা ৫ হয় এবং ওয়েবসাইটের দামের চেয়ে কম থাকে
-    """
   sp = float(site_price)
   if sp <= 0:
     return 0.0
@@ -110,42 +111,40 @@ def calc_brand_price(
   if is_dolphin_product(pname):
     return round_to_0_or_5(sp)
 
-  if is_thirty_days_plan(duration):
-    if abs(sp - 700.0) < 1e-6:
-      prev_base = 670.0
+  days = parse_days_count(duration)
+  if days == 0:
+    cut = 0.0 if sp <= 25 else 10.0
+  elif days <= 1:
+    if abs(sp - 60.0) < 1e-6:
+      cut = 10.0
+    elif sp >= 100:
+      cut = 20.0
     else:
-      raw_cut = min(50.0, sp * 0.05)
-      cut_amt = round_to_0_or_5(max(25.0, raw_cut))
-      prev_base = round_to_0_or_5(max(sp - cut_amt, sp * 0.72))
+      cut = 10.0
+  elif days <= 3:
+    cut = 20.0
+  elif days <= 10:
+    cut = 30.0 if sp >= 250 else 20.0
+  elif days <= 15:
+    cut = 40.0 if sp >= 300 else 30.0
   else:
-    if sp <= 30:
-      raw_cut = 5.0
-    elif sp <= 70:
-      raw_cut = 10.0
-    elif sp <= 150:
-      raw_cut = 15.0
-    elif sp <= 300:
-      raw_cut = 20.0
+    cut = 60.0 if sp >= 500 else 40.0
+
+  if is_angry_product(pname):
+    if days <= 1:
+      cut += 10.0
+    elif days <= 7:
+      cut = max(cut, 60.0)
+    elif days <= 15:
+      cut = 20.0
     else:
-      raw_cut = 25.0
-    cut_amt = min(25.0, round_to_0_or_5(raw_cut))
-    prev_base = round_to_0_or_5(max(sp - cut_amt, sp * 0.72))
+      cut = 60.0
 
-  boosted = round_to_0_or_5(prev_base * 1.14)
-  max_allowed_below_site = round_to_0_or_5(sp - 5.0)
-  if max_allowed_below_site < 5.0:
-    max_allowed_below_site = 5.0
-
-  final_p = min(boosted, max_allowed_below_site)
-  return round_to_0_or_5(final_p)
+  price = round_to_zero(max(10.0, sp - cut))
+  return price
 
 
 def get_vip_discount_pct(total_spent: float) -> float:
-  """
-    - মোট এপ্রুভড কেনাকাটা >= ৳5,000 হলে 30% ছাড়
-    - মোট এপ্রুভড কেনাকাটা >= ৳2,000 হলে 20% ছাড়
-    - এর নিচে 0%
-    """
   spent = float(total_spent or 0.0)
   if spent >= 5000.0:
     return 30.0
@@ -157,12 +156,7 @@ def get_vip_discount_pct(total_spent: float) -> float:
 def calc_vip_price_details(
     pname: str, base_price: float, total_spent: float
 ) -> tuple[float, float, float]:
-  """
-    রিটার্ন করে: (applied_pct, discount_amount, final_price)
-    - Dolphin প্যানেলে VIP ডিসকাউন্ট 0%
-    - ডিসকাউন্টের পর দাম ৫-এর গুণিতকে (শেষে ০ বা ৫) রাউন্ড হয়
-    """
-  price = round_to_0_or_5(float(base_price))
+  price = round_to_zero(float(base_price))
   if price <= 0 or is_dolphin_product(pname):
     return 0.0, 0.0, price
 
@@ -171,7 +165,7 @@ def calc_vip_price_details(
     return 0.0, 0.0, price
 
   raw_after = price * (1.0 - (pct / 100.0))
-  final_price = round_to_0_or_5(raw_after)
+  final_price = round_to_zero(raw_after)
   if final_price >= price:
     return 0.0, 0.0, price
 
@@ -183,46 +177,14 @@ def calc_discount_details(
     pname: str,
     duration: str,
     base_price: float,
-    user_disc_pct: float,
+    user_disc_pct: float = 0.0,
     total_spent: float = 0.0,
 ) -> tuple[float, float, float]:
-  """
-    VIP স্পেন্ডিং ডিসকাউন্ট ও রেফার/ইউজার ডিসকাউন্টের মধ্যে সর্বোচ্চ কার্যকর ডিসকাউন্ট হিসাব করে।
-    """
-  price = round_to_0_or_5(float(base_price))
-  if price <= 0 or is_dolphin_product(pname):
-    return 0.0, 0.0, price
-
-  vip_pct, vip_amt, vip_final = calc_vip_price_details(pname, price, total_spent)
-
-  ref_pct = 0.0
-  ref_amt = 0.0
-  ref_final = price
-  if is_three_days_or_more(duration) and float(user_disc_pct or 0.0) > 0:
-    avail_pct = float(user_disc_pct)
-    max_cap_pct = 30.0 if price > 600.0 else 5.0
-    applied_pct = min(avail_pct, max_cap_pct)
-    raw_after = price * (1.0 - (applied_pct / 100.0))
-    cost_floor = price * 0.70
-    profit_guard = cost_floor * 1.30
-    safe_floor = max(cost_floor, profit_guard)
-    if raw_after < safe_floor:
-      max_safe_disc_amt = max(0.0, price - safe_floor)
-      applied_pct = round((max_safe_disc_amt / price) * 100.0, 2)
-      ref_final = round_to_0_or_5(safe_floor)
-    else:
-      ref_final = round_to_0_or_5(raw_after)
-    ref_amt = max(0.0, round(price - ref_final, 2))
-    ref_pct = applied_pct if ref_amt > 0 else 0.0
-
-  if vip_amt >= ref_amt and vip_amt > 0:
-    return vip_pct, vip_amt, vip_final
-  if ref_amt > 0:
-    return ref_pct, ref_amt, ref_final
-  return 0.0, 0.0, price
+  # রেফার সিস্টেম বন্ধ; শুধু VIP স্পেন্ডিং ডিসকাউন্ট (ডলফিন প্যানেল ছাড়া) প্রযোজ্য
+  return calc_vip_price_details(pname, base_price, total_spent)
 
 
-# (product_name, category_key, [(duration, price_or_site_price, stock, bonus, is_fixed_official), ...])
+# (product_name, category_key, [(duration, final_bot_price, stock, bonus, is_fixed_official), ...])
 RAW_CATALOG = [
     (
         "DOLPHIN PLUSH - ROOT",
@@ -238,7 +200,7 @@ RAW_CATALOG = [
         "ROOT",
         [
             ("1 Day", 50.0, 25, "", False),
-            ("7 Days", 280.0, 20, "", False),
+            ("7 Days", 300.0, 20, "", False),
             ("15 Days", 480.0, 15, "", False),
             ("30 Days", 700.0, 10, "", False),
         ],
@@ -247,7 +209,7 @@ RAW_CATALOG = [
         "BR MODS - ROOT",
         "ROOT",
         [
-            ("1 Day", 50.0, 25, "", False),
+            ("1 Day", 40.0, 25, "", False),
             ("10 Days", 380.0, 15, "", False),
             ("30 Days", 680.0, 10, "", False),
         ],
@@ -256,8 +218,8 @@ RAW_CATALOG = [
         "TITAN MODS - ROOT",
         "ROOT",
         [
-            ("1 Day", 50.0, 25, "", False),
-            ("7 Days", 250.0, 20, "", False),
+            ("1 Day", 40.0, 25, "", False),
+            ("7 Days", 260.0, 20, "", False),
             ("15 Days", 450.0, 15, "", False),
             ("30 Days", 700.0, 10, "", False),
         ],
@@ -266,22 +228,22 @@ RAW_CATALOG = [
         "DRIP WIRE - NON ROOT",
         "NON_ROOT",
         [
-            ("3 Hours", 25.0, 30, "", False),
-            ("6 Hours", 50.0, 30, "", False),
-            ("12 Hours", 80.0, 25, "", False),
-            ("1 Day", 120.0, 20, "", False),
-            ("7 Days", 480.0, 15, "", False),
-            ("30 Days", 850.0, 10, "", False),
+            ("3 Hours", 20.0, 30, "", False),
+            ("6 Hours", 30.0, 30, "", False),
+            ("12 Hours", 60.0, 25, "", False),
+            ("1 Day", 80.0, 20, "", False),
+            ("7 Days", 350.0, 15, "", False),
+            ("30 Days", 700.0, 10, "", False),
         ],
     ),
     (
         "ANGRY MODS - ROOT",
         "ROOT",
         [
-            ("1 Day", 70.0, 20, "", False),
-            ("7 Days", 300.0, 20, "", False),
-            ("15 Days", 500.0, 15, "", False),
-            ("30 Days", 800.0, 10, "", False),
+            ("1 Day", 50.0, 20, "", False),
+            ("7 Days", 200.0, 20, "", False),
+            ("15 Days", 480.0, 15, "", False),
+            ("30 Days", 740.0, 10, "", False),
         ],
     ),
     (
@@ -289,18 +251,18 @@ RAW_CATALOG = [
         "NON_ROOT",
         [
             ("1 Day", 50.0, 25, "", False),
-            ("3 Days", 100.0, 20, "", False),
-            ("7 Days", 200.0, 20, "", False),
-            ("15 Days", 350.0, 15, "", False),
-            ("30 Days", 580.0, 10, "", False),
+            ("3 Days", 80.0, 20, "", False),
+            ("7 Days", 170.0, 20, "", False),
+            ("15 Days", 290.0, 15, "", False),
+            ("30 Days", 500.0, 10, "", False),
         ],
     ),
     (
         "BR MOD PC",
         "PC_LAPTOP",
         [
-            ("1 Day", 90.0, 20, "", False),
-            ("10 Days", 280.0, 15, "", False),
+            ("1 Day", 80.0, 20, "", False),
+            ("10 Days", 290.0, 15, "", False),
             ("30 Days", 480.0, 10, "", False),
         ],
     ),
@@ -313,9 +275,7 @@ CATALOG_PRODUCTS = [
         [
             (
                 canon_duration(dur),
-                round_to_0_or_5(pr)
-                if fixed_off
-                else calc_brand_price(pr, pname, canon_duration(dur)),
+                round_to_0_or_5(pr) if fixed_off else round_to_zero(pr),
                 stk,
                 bon,
             )
@@ -629,6 +589,8 @@ def update_payment_number(method: str, number: str):
 
 
 def register_or_update_user(message: Message, referrer_id: int = 0):
+  # রেফার সিস্টেম বন্ধ: referrer_id উপেক্ষা করা হয়
+  _ = referrer_id
   uid = message.from_user.id
   full_name = message.from_user.full_name or "User"
   username = (
@@ -648,34 +610,16 @@ def register_or_update_user(message: Message, referrer_id: int = 0):
   ref_awarded_to = 0
 
   if is_new:
-    valid_ref = 0
-    if referrer_id and referrer_id != uid:
-      cur.execute("SELECT user_id FROM users WHERE user_id = ?", (referrer_id,))
-      if cur.fetchone():
-        valid_ref = referrer_id
-
     cur.execute(
         """
             INSERT INTO users (
                 user_id, full_name, username, lang, balance,
                 total_spent, discount_pct, referral_count, referred_by, joined_at
             )
-            VALUES (?, ?, ?, 'bn', 0.0, 0.0, 0.0, 0, ?, ?)
+            VALUES (?, ?, ?, 'bn', 0.0, 0.0, 0.0, 0, 0, ?)
             """,
-        (uid, full_name, username, valid_ref, joined),
+        (uid, full_name, username, joined),
     )
-    if valid_ref:
-      cur.execute(
-          """
-                UPDATE users
-                SET referral_count = referral_count + 1,
-                    discount_pct = MIN(30.0, ROUND(discount_pct + 2.0, 2))
-                WHERE user_id = ?
-                """,
-          (valid_ref,),
-      )
-      ref_awarded_to = valid_ref
-
     lang = "bn"
     total_spent = 0.0
     disc_pct = 0.0
@@ -757,22 +701,24 @@ def build_welcome_message(full_name: str, lang: str, total_spent: float) -> str:
   if lang == "bn":
     return (
         f"👋 স্বাগতম, {full_name}!\n"
-        f"✨ ZORO 404 OFFICIAL বটে আপনাকে স্বাগতম।\n\n"
+        f"✨ ZORO 404 OFFICIAL বটে আপনাকে স্বাগতম।\n"
+        f"📢 আপডেট চ্যানেল: {CHANNEL_URL}\n\n"
         f"💎 আপনার বর্তমান স্ট্যাটাস:\n"
         f"• মোট কেনাকাটা: ৳{total_spent:.0f}\n"
-        f"• বর্তমান VIP ডিসকাউন্ট: {vip_pct:.0f}%\n\n"
-        f"👑 VIP ডিসকাউন্ট অফার:\n"
+        f"• বর্তমান VIP ডিসকাউন্ট (ডলফিন প্যানেল ছাড়া): {vip_pct:.0f}%\n\n"
+        f"👑 VIP ডিসকাউন্ট অফার (ডলফিন প্যানেল ছাড়া):\n"
         f"• মোট ৳2,000 কেনাকাটা করলে পরের সব অর্ডারে 20% ছাড়!\n"
         f"• মোট ৳5,000 কেনাকাটা করলে পরের সব অর্ডারে 30% ছাড়!\n\n"
-        f"🛒 কি কিনুন বাটনে চাপ দিয়ে এখনই আপনার পছন্দের প্ল্যান বেছে নিন।"
+        f"🛒 পাসওয়ার্ড কিনুন বাটনে চাপ দিয়ে এখনই আপনার পছন্দের প্ল্যান বেছে নিন।"
     )
   return (
       f"👋 Welcome, {full_name}!\n"
-      f"✨ Welcome to ZORO 404 OFFICIAL.\n\n"
+      f"✨ Welcome to ZORO 404 OFFICIAL.\n"
+      f"📢 Update Channel: {CHANNEL_URL}\n\n"
       f"💎 Your Current Status:\n"
       f"• Total Approved Spent: ৳{total_spent:.0f}\n"
-      f"• Active VIP Discount: {vip_pct:.0f}%\n\n"
-      f"👑 VIP Discount Tiers:\n"
+      f"• Active VIP Discount (without Dolphin): {vip_pct:.0f}%\n\n"
+      f"👑 VIP Discount Tiers (without Dolphin):\n"
       f"• Spend ৳2,000+ total to unlock 20% off future orders!\n"
       f"• Spend ৳5,000+ total to unlock 30% off future orders!\n\n"
       f"🛒 Tap Buy Keys to browse categories and order."
@@ -804,6 +750,12 @@ def status_label(status: str, lang: str) -> str:
   return (bn_map if lang == "bn" else en_map).get(status, status)
 
 
+def update_channel_kb() -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(inline_keyboard=[[
+      InlineKeyboardButton(text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL),
+  ]])
+
+
 def category_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[
@@ -824,6 +776,11 @@ def category_kb() -> InlineKeyboardMarkup:
                   text="🌐 ALL Products", callback_data="cat_ALL"
               ),
           ],
+          [
+              InlineKeyboardButton(
+                  text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL
+              ),
+          ],
       ]
   )
 
@@ -836,10 +793,6 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
             KeyboardButton(text="👑 VIP Discount"),
         ],
         [
-            KeyboardButton(text="🎁 My Discount"),
-            KeyboardButton(text="🔗 Refer & Earn"),
-        ],
-        [
             KeyboardButton(text="📦 My Orders"),
             KeyboardButton(text="🌐 Change Language"),
         ],
@@ -850,12 +803,8 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
   else:
     rows = [
         [
-            KeyboardButton(text="🛒 কি কিনুন"),
+            KeyboardButton(text="🛒 পাসওয়ার্ড কিনুন"),
             KeyboardButton(text="👑 VIP ডিসকাউন্ট"),
-        ],
-        [
-            KeyboardButton(text="🎁 মাই ডিসকাউন্ট"),
-            KeyboardButton(text="🔗 রেফার লিংক"),
         ],
         [
             KeyboardButton(text="📦 আমার অর্ডার"),
@@ -966,33 +915,18 @@ async def cmd_start(message: Message):
   admin_states.pop(uid, None)
   user_states.pop(uid, None)
 
-  ref_id = 0
-  parts = (message.text or "").strip().split(maxsplit=1)
-  if len(parts) == 2 and parts[1].strip().isdigit():
-    ref_id = int(parts[1].strip())
-
   (
       is_new,
       lang,
       total_spent,
-      disc_pct,
-      ref_cnt,
+      _,
+      _,
       total_users,
       full_name,
       username,
       joined,
-      ref_awarded_to,
-  ) = register_or_update_user(message, referrer_id=ref_id)
-
-  if ref_awarded_to:
-    try:
-      await bot.send_message(
-          ref_awarded_to,
-          f"🎉 নতুন রেফার সফল হয়েছে! আপনার মাই ডিসকাউন্টে +2% ডিসকাউন্ট যোগ"
-          f" হয়েছে।",
-      )
-    except Exception:
-      pass
+      _,
+  ) = register_or_update_user(message, referrer_id=0)
 
   if is_new and message.from_user.id != ADMIN_ID:
     new_user_alert = (
@@ -1000,7 +934,6 @@ async def cmd_start(message: Message):
         f"👤 Name: {full_name}\n"
         f"🆔 Username: {username}\n"
         f"💬 Chat ID: {message.from_user.id}\n"
-        f"🔗 Referred By: {ref_awarded_to or 'None'}\n"
         f"🕒 Time: {joined}\n"
         f"👥 Total Users: {total_users}"
     )
@@ -1058,84 +991,24 @@ async def btn_vip_discount(message: Message):
         f"👑 VIP স্পেন্ডিং ডিসকাউন্ট\n\n"
         f"• ইউজার: {full_name} ({username})\n"
         f"• মোট এপ্রুভড কেনাকাটা: ৳{total_spent:.0f}\n"
-        f"• বর্তমান ডিসকাউন্ট: {vip_pct:.0f}%\n"
+        f"• বর্তমান ডিসকাউন্ট (ডলফিন প্যানেল ছাড়া): {vip_pct:.0f}%\n"
         f"• স্ট্যাটাস: {next_info_bn}\n\n"
-        f"নিয়মাবলি:\n"
+        f"নিয়মাবলি (ডলফিন প্যানেল ছাড়া):\n"
         f"1. মোট কেনাকাটা ৳2,000 হলে পরের সব অর্ডারে 20% ছাড়।\n"
         f"2. মোট কেনাকাটা ৳5,000 হলে পরের সব অর্ডারে 30% ছাড়।\n"
-        f"3. Dolphin প্যানেলে ডেভেলপারের নিয়ম অনুযায়ী কোনো ডিসকাউন্ট নেই।"
+        f"3. ডলফিন প্যানেল ছাড়া অন্যান্য প্যানেলে এই নিয়ম প্রযোজ্য।"
     )
   else:
     txt = (
         f"👑 VIP Spending Discount\n\n"
         f"• User: {full_name} ({username})\n"
         f"• Total Approved Spent: ৳{total_spent:.0f}\n"
-        f"• Active Discount: {vip_pct:.0f}%\n"
+        f"• Active Discount (without Dolphin): {vip_pct:.0f}%\n"
         f"• Status: {next_info_en}\n\n"
-        f"Rules:\n"
+        f"Rules (without Dolphin):\n"
         f"1. Spend ৳2,000+ total to unlock 20% off all future orders.\n"
         f"2. Spend ৳5,000+ total to unlock 30% off all future orders.\n"
-        f"3. No discount applies to Dolphin panels."
-    )
-  await message.answer(txt)
-
-
-@dp.message(F.text.in_(["🎁 মাই ডিসকাউন্ট", "🎁 My Discount"]))
-async def btn_my_discount(message: Message):
-  admin_states.pop(message.from_user.id, None)
-  full_name, username, lang, total_spent, disc_pct, ref_cnt = get_user_info(
-      message.from_user.id
-  )
-  vip_pct = get_vip_discount_pct(total_spent)
-  if lang == "bn":
-    txt = (
-        f"🎁 মাই ডিসকাউন্ট\n\n"
-        f"• ইউজার: {full_name} ({username})\n"
-        f"• মোট কেনাকাটা: ৳{total_spent:.0f} (VIP: {vip_pct:.0f}%)\n"
-        f"• মোট সফল রেফার: {ref_cnt} জন\n"
-        f"• জমে থাকা রেফার ডিসকাউন্ট: {disc_pct:.0f}%\n\n"
-        f"নিয়মাবলি:\n"
-        f"1. মোট কেনাকাটা ৳2,000 হলে 20% এবং ৳5,000 হলে 30% VIP ছাড়।\n"
-        f"2. প্রতি সফল রেফারে +2% ডিসকাউন্ট জমা হয়।\n"
-        f"3. Dolphin প্যানেলে ডেভেলপারের নিয়ম অনুযায়ী কোনো ডিসকাউন্ট নেই।"
-    )
-  else:
-    txt = (
-        f"🎁 My Discount\n\n"
-        f"• User: {full_name} ({username})\n"
-        f"• Total Spent: ৳{total_spent:.0f} (VIP: {vip_pct:.0f}%)\n"
-        f"• Valid Referrals: {ref_cnt}\n"
-        f"• Saved Referral Discount: {disc_pct:.0f}%\n\n"
-        f"Rules:\n"
-        f"1. 20% VIP discount at ৳2,000+ spent and 30% at ৳5,000+ spent.\n"
-        f"2. +2% discount per valid referral.\n"
-        f"3. No discount on Dolphin panels."
-    )
-  await message.answer(txt)
-
-
-@dp.message(F.text.in_(["🔗 রেফার লিংক", "🔗 Refer & Earn"]))
-async def btn_refer_link(message: Message):
-  admin_states.pop(message.from_user.id, None)
-  uid = message.from_user.id
-  _, _, lang, _, disc_pct, ref_cnt = get_user_info(uid)
-  me = await bot.get_me()
-  ref_link = f"https://t.me/{me.username}?start={uid}"
-  if lang == "bn":
-    txt = (
-        f"🔗 রেফার ও ডিসকাউন্ট\n\n"
-        f"আপনার রেফার লিংক:\n{ref_link}\n\n"
-        f"• সফল রেফার: {ref_cnt} জন\n"
-        f"• জমে থাকা ডিসকাউন্ট: {disc_pct:.0f}%\n"
-        f"প্রতি রেফারে 2% ডিসকাউন্ট পাবেন।"
-    )
-  else:
-    txt = (
-        f"🔗 Refer & Discount\n\n"
-        f"Your referral link:\n{ref_link}\n\n"
-        f"• Valid Referrals: {ref_cnt}\n"
-        f"• Saved Discount: {disc_pct:.0f}%\n"
-        f"Earn 2% discount per valid referral."
+        f"3. Applies to panels without Dolphin."
     )
   await message.answer(txt)
 
@@ -1146,16 +1019,16 @@ async def btn_change_lang(message: Message):
   await message.answer("ভাষা বেছে নিন / Choose language:", reply_markup=lang_kb())
 
 
-@dp.message(F.text.in_(["🛒 কি কিনুন", "🛒 Buy Keys"]))
+@dp.message(F.text.in_(["🛒 পাসওয়ার্ড কিনুন", "🛒 কি কিনুন", "🛒 Buy Keys"]))
 async def btn_buy_keys(message: Message):
   admin_states.pop(message.from_user.id, None)
-  _, _, lang, total_spent, disc_pct, _ = get_user_info(message.from_user.id)
+  _, _, lang, total_spent, _, _ = get_user_info(message.from_user.id)
   vip_pct = get_vip_discount_pct(total_spent)
-  eff_pct = max(vip_pct, disc_pct)
   header = (
-      f"👑 বর্তমান VIP ছাড়: {vip_pct:.0f}% | রেফার ছাড়: {disc_pct:.0f}%\nক্যাটাগরি সিলেক্ট করুন:"
+      f"👑 বর্তমান VIP ছাড়: {vip_pct:.0f}% (ডলফিন প্যানেল ছাড়া)\nক্যাটাগরি"
+      " সিলেক্ট করুন:"
       if lang == "bn"
-      else f"👑 VIP Discount: {vip_pct:.0f}% | Ref Discount: {disc_pct:.0f}% (Active: {eff_pct:.0f}%)\nSelect a category:"
+      else f"👑 VIP Discount: {vip_pct:.0f}% (without Dolphin)\nSelect a category:"
   )
   await message.answer(header, reply_markup=category_kb())
 
@@ -1209,6 +1082,9 @@ async def cb_select_category(callback: CallbackQuery):
           callback_data="back_cats",
       )
   ])
+  rows.append([
+      InlineKeyboardButton(text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL),
+  ])
 
   header = (
       f"ক্যাটাগরি: {cat_title}\nপ্রোডাক্ট সিলেক্ট করুন:"
@@ -1234,7 +1110,7 @@ async def cb_back_cats(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("prod_"))
 async def cb_select_product(callback: CallbackQuery):
   pid = int(callback.data.split("_", 1)[1])
-  _, _, lang, total_spent, disc_pct, _ = get_user_info(callback.from_user.id)
+  _, _, lang, total_spent, _, _ = get_user_info(callback.from_user.id)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -1267,7 +1143,7 @@ async def cb_select_product(callback: CallbackQuery):
   for pl in plans:
     base_p = float(pl["price"])
     app_pct, _, final_p = calc_discount_details(
-        pname, pl["duration"], base_p, disc_pct, total_spent
+        pname, pl["duration"], base_p, 0.0, total_spent
     )
     disc_tag = f" (-{app_pct:.0f}% → ৳{final_p:.0f})" if app_pct > 0 else ""
     label = (
@@ -1279,6 +1155,9 @@ async def cb_select_product(callback: CallbackQuery):
 
   buttons.append(
       [InlineKeyboardButton(text="⬅️ Back", callback_data=f"cat_{cat_back}")]
+  )
+  buttons.append(
+      [InlineKeyboardButton(text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL)]
   )
 
   title = (
@@ -1296,7 +1175,7 @@ async def cb_select_product(callback: CallbackQuery):
 async def cb_select_plan(callback: CallbackQuery):
   plid = int(callback.data.split("_", 1)[1])
   uid = callback.from_user.id
-  _, _, lang, total_spent, disc_pct, _ = get_user_info(uid)
+  _, _, lang, total_spent, _, _ = get_user_info(uid)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -1317,10 +1196,14 @@ async def cb_select_plan(callback: CallbackQuery):
 
   pname = row["name"]
   duration = row["duration"]
-  base_price = round_to_0_or_5(float(row["price"]))
+  base_price = (
+      round_to_0_or_5(float(row["price"]))
+      if is_dolphin_product(pname)
+      else round_to_zero(float(row["price"]))
+  )
   bonus = row["bonus"] or ""
   app_pct, disc_amt, final_price = calc_discount_details(
-      pname, duration, base_price, disc_pct, total_spent
+      pname, duration, base_price, 0.0, total_spent
   )
 
   bkash_num, nagad_num = get_payment_numbers()
@@ -1357,7 +1240,7 @@ async def cb_select_plan(callback: CallbackQuery):
   if app_pct > 0:
     price_lines = (
         f"💵 মূল দাম: ৳{base_price:.0f}\n"
-        f"👑 ডিসকাউন্ট ({app_pct:.0f}%): -৳{disc_amt:.0f}\n"
+        f"👑 VIP ডিসকাউন্ট ({app_pct:.0f}%): -৳{disc_amt:.0f}\n"
         f"✅ পরিশোধযোগ্য: ৳{final_price:.0f} (Send Money)"
     )
   else:
@@ -1390,7 +1273,7 @@ async def cb_select_plan(callback: CallbackQuery):
         f"✍️ Valid TrxID / mobile number"
     )
 
-  await callback.message.edit_text(msg)
+  await callback.message.edit_text(msg, reply_markup=update_channel_kb())
   await callback.answer()
 
 
@@ -1439,7 +1322,7 @@ async def btn_my_orders(message: Message):
         f" ৳{paid_amt:.0f}{disc_txt} [{st_txt}]\n"
         f"   🕒 {r['created_at']} | Proof: {proof_txt}{key_txt}"
     )
-  await message.answer("\n\n".join(lines))
+  await message.answer("\n\n".join(lines), reply_markup=update_channel_kb())
 
 
 @dp.message(F.text.in_(["📞 সাপোর্ট", "📞 Support"]))
@@ -1450,15 +1333,17 @@ async def btn_support(message: Message):
     msg = (
         f"📞 **সাপোর্ট ও যোগাযোগ**\n\n"
         f"🔹 **টেলিগ্রাম সাপোর্ট:** **{SUPPORT_HANDLE}**\n"
-        f"🔹 **হোয়াটসঅ্যাপ:** **{WHATSAPP_NUMBER}**"
+        f"🔹 **হোয়াটসঅ্যাপ:** **{WHATSAPP_NUMBER}**\n"
+        f"🔹 **আপডেট চ্যানেল:** **{CHANNEL_URL}**"
     )
   else:
     msg = (
         f"📞 **Support & Contact**\n\n"
         f"🔹 **Telegram Support:** **{SUPPORT_HANDLE}**\n"
-        f"🔹 **WhatsApp:** **{WHATSAPP_NUMBER}**"
+        f"🔹 **WhatsApp:** **{WHATSAPP_NUMBER}**\n"
+        f"🔹 **Update Channel:** **{CHANNEL_URL}**"
     )
-  await message.answer(msg, parse_mode="Markdown")
+  await message.answer(msg, parse_mode="Markdown", reply_markup=update_channel_kb())
 
 
 def finalize_order_approval(oid: int, key_val: str):
@@ -1481,7 +1366,6 @@ def finalize_order_approval(oid: int, key_val: str):
   target_uid = row["user_id"]
   plid = row["plan_id"]
   paid_amt = float(row["final_amount"] or row["price"] or 0.0)
-  disc_used = float(row["discount_used_pct"] or 0.0)
   already_approved = row["status"] == "approved"
 
   cur.execute(
@@ -1509,15 +1393,6 @@ def finalize_order_approval(oid: int, key_val: str):
         "UPDATE users SET total_spent = ? WHERE user_id = ?",
         (new_spent, target_uid),
     )
-    if disc_used > 0 and get_vip_discount_pct(new_spent) < disc_used:
-      cur.execute(
-          """
-                UPDATE users
-                SET discount_pct = MAX(0.0, ROUND(discount_pct - ?, 2))
-                WHERE user_id = ?
-                """,
-          (disc_used, target_uid),
-      )
 
   new_vip_tier = get_vip_discount_pct(new_spent)
   conn.commit()
@@ -1568,7 +1443,8 @@ async def cmd_admin_key(message: Message):
   if new_tier > old_tier:
     tier_msg = (
         f"\n\n🎉 অভিনন্দন! আপনার মোট কেনাকাটা ৳{new_spent:.0f} পূর্ণ হওয়ায়"
-        f" এখন থেকে সব প্রোডাক্টে {new_tier:.0f}% VIP ছাড় চালু হয়েছে!"
+        f" এখন থেকে সব প্রোডাক্টে (ডলফিন প্যানেল ছাড়া) {new_tier:.0f}% VIP ছাড়"
+        " চালু হয়েছে!"
     )
 
   try:
@@ -1576,6 +1452,7 @@ async def cmd_admin_key(message: Message):
         target_uid,
         f"✅ আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!\n🔑 Key / Password:"
         f" {key_val}{tier_msg}",
+        reply_markup=update_channel_kb(),
     )
   except Exception:
     pass
@@ -1687,8 +1564,8 @@ async def cb_adm_users(callback: CallbackQuery):
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
-      "SELECT user_id, full_name, username, total_spent, discount_pct,"
-      " referral_count, joined_at FROM users ORDER BY user_id DESC LIMIT 15"
+      "SELECT user_id, full_name, username, total_spent, joined_at FROM users"
+      " ORDER BY user_id DESC LIMIT 15"
   )
   rows = cur.fetchall()
   cur.execute("SELECT COUNT(*) AS cnt FROM users")
@@ -1706,8 +1583,7 @@ async def cb_adm_users(callback: CallbackQuery):
     vp = get_vip_discount_pct(sp)
     lines.append(
         f"• {r['user_id']} | {r['full_name']} ({r['username']}) | "
-        f"Spent: ৳{sp:.0f} (VIP {vp:.0f}%) | 🎁 {float(r['discount_pct'] or 0):.0f}% (Refs:"
-        f" {int(r['referral_count'] or 0)}) | 🕒 {r['joined_at']}"
+        f"Spent: ৳{sp:.0f} (VIP {vp:.0f}%) | 🕒 {r['joined_at']}"
     )
   await callback.message.answer("\n".join(lines))
   await callback.answer()
@@ -2023,8 +1899,8 @@ async def handle_messages(message: Message):
       conn = get_conn()
       cur = conn.cursor()
       cur.execute(
-          "SELECT full_name, username, total_spent, discount_pct,"
-          " referral_count, joined_at FROM users WHERE user_id = ?",
+          "SELECT full_name, username, total_spent, joined_at FROM users WHERE"
+          " user_id = ?",
           (target_uid,),
       )
       urow = cur.fetchone()
@@ -2055,8 +1931,6 @@ async def handle_messages(message: Message):
           f"• ID: {target_uid}\n"
           f"• নাম: {urow['full_name']} ({urow['username']})\n"
           f"• মোট কেনাকাটা: ৳{sp:.0f} | VIP ডিসকাউন্ট: {vp:.0f}%\n"
-          f"• রেফার: {int(urow['referral_count'] or 0)} | রেফার ডিসকাউন্ট:"
-          f" {float(urow['discount_pct'] or 0):.0f}%\n"
           f"• জয়েন: {urow['joined_at']}\n"
           f"• এপ্রুভড অর্ডার: {app_o} | পেন্ডিং অর্ডার: {pend_o}"
       )
@@ -2085,7 +1959,8 @@ async def handle_messages(message: Message):
       if new_tier > old_tier:
         tier_msg = (
             f"\n\n🎉 অভিনন্দন! আপনার মোট কেনাকাটা ৳{new_spent:.0f} পূর্ণ হওয়ায়"
-            f" এখন থেকে সব প্রোডাক্টে {new_tier:.0f}% VIP ছাড় চালু হয়েছে!"
+            f" এখন থেকে সব প্রোডাক্টে (ডলফিন প্যানেল ছাড়া) {new_tier:.0f}% VIP ছাড়"
+            " চালু হয়েছে!"
         )
 
       try:
@@ -2093,6 +1968,7 @@ async def handle_messages(message: Message):
             target_uid,
             f"✅ আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!\n🔑 Key / Password:"
             f" {key_val}{tier_msg}",
+            reply_markup=update_channel_kb(),
         )
       except Exception:
         pass
@@ -2116,7 +1992,9 @@ async def handle_messages(message: Message):
       sent = 0
       for u_id in all_users:
         try:
-          await bot.send_message(u_id, f"📢 {txt}")
+          await bot.send_message(
+              u_id, f"📢 {txt}", reply_markup=update_channel_kb()
+          )
           sent += 1
         except Exception:
           pass
@@ -2327,7 +2205,11 @@ async def handle_messages(message: Message):
         await message.answer("সঠিক দাম লিখুন।")
         return
 
-      new_price = round_to_0_or_5(raw_p)
+      new_price = (
+          round_to_0_or_5(raw_p)
+          if is_dolphin_product(prow["name"])
+          else round_to_zero(raw_p)
+      )
 
       if new_stock is not None:
         cur.execute(
@@ -2396,7 +2278,8 @@ async def handle_messages(message: Message):
             f"সঠিক TrxID, ১১ ডিজিটের মোবাইল নম্বর অথবা স্ক্রিনশট দিন।"
             if lang == "bn"
             else f"❌ Auto-Rejected! Order #{oid} was cancelled.\n"
-            f"Send a valid TrxID, 11-digit mobile number, or screenshot."
+            f"Send a valid TrxID, 11-digit mobile number, or screenshot.",
+            reply_markup=update_channel_kb(),
         )
         return
 
@@ -2411,7 +2294,8 @@ async def handle_messages(message: Message):
         await message.answer(
             f"❌ ডুপ্লিকেট প্রুফ! অর্ডার #{oid} অটো-রিজেক্ট করা হয়েছে।"
             if lang == "bn"
-            else f"❌ Duplicate proof! Order #{oid} was auto-rejected."
+            else f"❌ Duplicate proof! Order #{oid} was auto-rejected.",
+            reply_markup=update_channel_kb(),
         )
         return
 
@@ -2445,14 +2329,15 @@ async def handle_messages(message: Message):
           f"✅ অর্ডার #{oid} জমা হয়েছে!\nঅ্যাডমিন চেক করে Key / Password পাঠাবেন।"
           if lang == "bn"
           else f"✅ Order #{oid} submitted!\nAdmin will check and send your"
-          f" Key / Password."
+          f" Key / Password.",
+          reply_markup=update_channel_kb(),
       )
 
-      full_name, username, _, total_spent, cur_disc, ref_cnt = get_user_info(uid)
+      full_name, username, _, total_spent, _, _ = get_user_info(uid)
       offer_line = f"\n🎁 Offer: {bonus}" if bonus else ""
       disc_line = (
-          f"\n👑 Discount Applied: {disc_pct:.0f}% (Spent:"
-          f" ৳{total_spent:.0f}, Ref Bal: {cur_disc:.0f}%, Refs: {ref_cnt})"
+          f"\n👑 VIP Discount Applied: {disc_pct:.0f}% (Spent:"
+          f" ৳{total_spent:.0f})"
           if disc_pct > 0
           else ""
       )
