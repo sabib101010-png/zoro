@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import logging
 import os
 import re
 import sqlite3
@@ -7,6 +8,9 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -14,6 +18,12 @@ from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
 )
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("zoro404_bot")
 
 BOT_TOKEN = os.getenv(
     "BOT_TOKEN", "9211572979:AAEI73Lq3e1FbtcmiYpQSmYlYjzMMh3QKvg"
@@ -294,8 +304,10 @@ def now_str() -> str:
 
 
 def get_conn() -> sqlite3.Connection:
-  conn = sqlite3.connect(DB_PATH)
+  conn = sqlite3.connect(DB_PATH, timeout=30.0)
   conn.row_factory = sqlite3.Row
+  conn.execute("PRAGMA journal_mode=WAL;")
+  conn.execute("PRAGMA synchronous=NORMAL;")
   return conn
 
 
@@ -756,6 +768,24 @@ def update_channel_kb() -> InlineKeyboardMarkup:
   ]])
 
 
+def cancel_order_kb(oid: int, lang: str = "bn") -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(
+      inline_keyboard=[
+          [
+              InlineKeyboardButton(
+                  text="❌ অর্ডার বাতিল করুন" if lang == "bn" else "❌ Cancel Order",
+                  callback_data=f"cancelord_{oid}",
+              )
+          ],
+          [
+              InlineKeyboardButton(
+                  text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL
+              )
+          ],
+      ]
+  )
+
+
 def category_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[
@@ -814,6 +844,7 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
             KeyboardButton(text="📞 সাপোর্ট"),
         ],
     ]
+  # শুধু ADMIN_ID-র জন্যই Admin Panel বাটন দেখানো হবে
   if user_id == ADMIN_ID:
     rows.append([KeyboardButton(text="🛠 Admin Panel")])
   return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
@@ -909,6 +940,59 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
+async def setup_bot_commands():
+  user_commands = [
+      BotCommand(command="start", description="বট শুরু / মেনু খুলুন"),
+      BotCommand(command="buy", description="পাসওয়ার্ড / কি কিনুন"),
+      BotCommand(command="orders", description="আমার অর্ডার দেখুন"),
+      BotCommand(command="vip", description="VIP ডিসকাউন্ট স্ট্যাটাস"),
+      BotCommand(command="support", description="সাপোর্ট ও যোগাযোগ"),
+  ]
+  admin_commands = user_commands + [
+      BotCommand(command="admin", description="অ্যাডমিন কন্ট্রোল প্যানেল"),
+      BotCommand(command="key", description="অর্ডার এপ্রুভ ও Key পাঠান"),
+      BotCommand(command="report", description="সেলস রিপোর্ট দেখুন"),
+  ]
+  try:
+    await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
+    await bot.set_my_commands(
+        admin_commands, scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+    )
+  except Exception as exc:
+    logger.warning("Failed to set bot commands: %s", exc)
+
+
+async def open_admin_panel(message: Message):
+  # শুধু ADMIN_ID নিজেই /admin বা Admin Panel ব্যবহার করতে পারবে
+  if message.from_user.id != ADMIN_ID:
+    return
+  admin_states.pop(ADMIN_ID, None)
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT COUNT(*) AS cnt FROM users")
+  u_cnt = cur.fetchone()["cnt"]
+  cur.execute("SELECT COUNT(*) AS cnt FROM products")
+  p_cnt = cur.fetchone()["cnt"]
+  cur.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status = 'pending'")
+  o_cnt = cur.fetchone()["cnt"]
+  conn.close()
+
+  await message.answer(
+      f"🛠 Admin Control ({SUPPORT_HANDLE})\n"
+      f"👥 Users: {u_cnt} | 📦 Products: {p_cnt}\n"
+      f"⏳ Pending Orders: {o_cnt}",
+      reply_markup=admin_panel_kb(),
+  )
+
+
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+  # শুধু ADMIN_ID নিজেই দেখতে পারবে; অন্য কেউ দিলে কোনো রেসপন্স যাবে না
+  if message.from_user.id != ADMIN_ID:
+    return
+  await open_admin_panel(message)
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
   uid = message.from_user.id
@@ -966,7 +1050,9 @@ async def cb_setlang(callback: CallbackQuery):
   await callback.answer()
 
 
-@dp.message(F.text.in_(["👑 VIP ডিসকাউন্ট", "👑 VIP Discount"]))
+@dp.message(
+    F.text.in_(["👑 VIP ডিসকাউন্ট", "👑 VIP Discount"]) | F.text.startswith("/vip")
+)
 async def btn_vip_discount(message: Message):
   admin_states.pop(message.from_user.id, None)
   full_name, username, lang, total_spent, _, _ = get_user_info(
@@ -1019,7 +1105,10 @@ async def btn_change_lang(message: Message):
   await message.answer("ভাষা বেছে নিন / Choose language:", reply_markup=lang_kb())
 
 
-@dp.message(F.text.in_(["🛒 পাসওয়ার্ড কিনুন", "🛒 কি কিনুন", "🛒 Buy Keys"]))
+@dp.message(
+    F.text.in_(["🛒 পাসওয়ার্ড কিনুন", "🛒 কি কিনুন", "🛒 Buy Keys"])
+    | F.text.startswith("/buy")
+)
 async def btn_buy_keys(message: Message):
   admin_states.pop(message.from_user.id, None)
   _, _, lang, total_spent, _, _ = get_user_info(message.from_user.id)
@@ -1117,8 +1206,8 @@ async def cb_select_product(callback: CallbackQuery):
   cur.execute("SELECT name, category FROM products WHERE id = ?", (pid,))
   p_row = cur.fetchone()
   cur.execute(
-      "SELECT id, duration, price, bonus FROM plans WHERE product_id = ?"
-      " ORDER BY id",
+      "SELECT id, duration, price, stock, bonus FROM plans WHERE product_id ="
+      " ? ORDER BY id",
       (pid,),
   )
   plans = cur.fetchall()
@@ -1142,12 +1231,14 @@ async def cb_select_product(callback: CallbackQuery):
   buttons = []
   for pl in plans:
     base_p = float(pl["price"])
+    stk = int(pl["stock"] or 0)
     app_pct, _, final_p = calc_discount_details(
         pname, pl["duration"], base_p, 0.0, total_spent
     )
     disc_tag = f" (-{app_pct:.0f}% → ৳{final_p:.0f})" if app_pct > 0 else ""
+    out_tag = " [Stock Out]" if stk <= 0 else ""
     label = (
-        f"{pl['duration']} - ৳{base_p:.0f}{disc_tag}{format_bonus_bracket(pl['bonus'])}"
+        f"{pl['duration']} - ৳{base_p:.0f}{disc_tag}{format_bonus_bracket(pl['bonus'])}{out_tag}"
     )
     buttons.append(
         [InlineKeyboardButton(text=label, callback_data=f"plan_{pl['id']}")]
@@ -1181,7 +1272,7 @@ async def cb_select_plan(callback: CallbackQuery):
   cur = conn.cursor()
   cur.execute(
       """
-        SELECT p.name, pl.duration, pl.price, pl.bonus
+        SELECT p.name, pl.duration, pl.price, pl.stock, pl.bonus
         FROM plans pl
         JOIN products p ON pl.product_id = p.id
         WHERE pl.id = ?
@@ -1192,6 +1283,16 @@ async def cb_select_plan(callback: CallbackQuery):
   if not row:
     conn.close()
     await callback.answer("Plan not found", show_alert=True)
+    return
+
+  if int(row["stock"] or 0) <= 0:
+    conn.close()
+    await callback.answer(
+        "এই প্ল্যানের স্টক বর্তমানে শেষ।"
+        if lang == "bn"
+        else "This plan is currently out of stock.",
+        show_alert=True,
+    )
     return
 
   pname = row["name"]
@@ -1273,11 +1374,44 @@ async def cb_select_plan(callback: CallbackQuery):
         f"✍️ Valid TrxID / mobile number"
     )
 
-  await callback.message.edit_text(msg, reply_markup=update_channel_kb())
+  await callback.message.edit_text(
+      msg, reply_markup=cancel_order_kb(oid, lang)
+  )
   await callback.answer()
 
 
-@dp.message(F.text.in_(["📦 আমার অর্ডার", "📦 My Orders"]))
+@dp.callback_query(F.data.startswith("cancelord_"))
+async def cb_user_cancel_order(callback: CallbackQuery):
+  oid = int(callback.data.split("_", 1)[1])
+  uid = callback.from_user.id
+  _, _, lang, _, _, _ = get_user_info(uid)
+
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute(
+      "SELECT status FROM orders WHERE id = ? AND user_id = ?", (oid, uid)
+  )
+  row = cur.fetchone()
+  if row and row["status"] == "pending_payment":
+    cur.execute("UPDATE orders SET status = 'rejected' WHERE id = ?", (oid,))
+    conn.commit()
+  conn.close()
+
+  if user_states.get(uid, {}).get("order_id") == oid:
+    user_states.pop(uid, None)
+
+  await callback.message.edit_text(
+      f"❌ অর্ডার #{oid} বাতিল করা হয়েছে।"
+      if lang == "bn"
+      else f"❌ Order #{oid} cancelled.",
+      reply_markup=update_channel_kb(),
+  )
+  await callback.answer()
+
+
+@dp.message(
+    F.text.in_(["📦 আমার অর্ডার", "📦 My Orders"]) | F.text.startswith("/orders")
+)
 async def btn_my_orders(message: Message):
   admin_states.pop(message.from_user.id, None)
   _, _, lang, _, _, _ = get_user_info(message.from_user.id)
@@ -1325,7 +1459,9 @@ async def btn_my_orders(message: Message):
   await message.answer("\n\n".join(lines), reply_markup=update_channel_kb())
 
 
-@dp.message(F.text.in_(["📞 সাপোর্ট", "📞 Support"]))
+@dp.message(
+    F.text.in_(["📞 সাপোর্ট", "📞 Support"]) | F.text.startswith("/support")
+)
 async def btn_support(message: Message):
   admin_states.pop(message.from_user.id, None)
   _, _, lang, _, _, _ = get_user_info(message.from_user.id)
@@ -1462,27 +1598,39 @@ async def cmd_admin_key(message: Message):
   )
 
 
+@dp.message(Command("report"))
+async def cmd_admin_report(message: Message):
+  if message.from_user.id != ADMIN_ID:
+    return
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute("""
+        SELECT COUNT(*) AS cnt, COALESCE(SUM(COALESCE(NULLIF(o.final_amount, 0), pl.price)), 0) AS amt
+        FROM orders o
+        JOIN plans pl ON o.plan_id = pl.id
+        WHERE o.status = 'approved'
+        """)
+  app_ord = cur.fetchone()
+  cur.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status = 'pending'")
+  pend_ord = cur.fetchone()["cnt"]
+  cur.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status = 'rejected'")
+  rej_ord = cur.fetchone()["cnt"]
+  conn.close()
+
+  total_sales = float(app_ord["amt"] or 0.0)
+  await message.answer(
+      f"📊 সেলস রিপোর্ট\n\n"
+      f"• এপ্রুভড অর্ডার: {app_ord['cnt']} টি (৳{total_sales:.0f})\n"
+      f"• পেন্ডিং অর্ডার: {pend_ord} টি\n"
+      f"• রিজেক্টেড অর্ডার: {rej_ord} টি"
+  )
+
+
 @dp.message(F.text == "🛠 Admin Panel")
 async def btn_admin_panel(message: Message):
   if message.from_user.id != ADMIN_ID:
     return
-  admin_states.pop(ADMIN_ID, None)
-  conn = get_conn()
-  cur = conn.cursor()
-  cur.execute("SELECT COUNT(*) AS cnt FROM users")
-  u_cnt = cur.fetchone()["cnt"]
-  cur.execute("SELECT COUNT(*) AS cnt FROM products")
-  p_cnt = cur.fetchone()["cnt"]
-  cur.execute("SELECT COUNT(*) AS cnt FROM orders WHERE status = 'pending'")
-  o_cnt = cur.fetchone()["cnt"]
-  conn.close()
-
-  await message.answer(
-      f"🛠 Admin Control ({SUPPORT_HANDLE})\n"
-      f"👥 Users: {u_cnt} | 📦 Products: {p_cnt}\n"
-      f"⏳ Pending Orders: {o_cnt}",
-      reply_markup=admin_panel_kb(),
-  )
+  await open_admin_panel(message)
 
 
 @dp.callback_query(F.data == "adm_report")
@@ -2368,9 +2516,15 @@ async def handle_messages(message: Message):
               admin_alert,
               reply_markup=order_approve_start_kb(oid),
           )
-      except Exception:
-        pass
+      except Exception as exc:
+        logger.warning("Failed to send order alert to admin: %s", exc)
       return
+
+
+@dp.errors()
+async def on_error(event, exception):
+  logger.exception("Unhandled error in dispatcher: %s", exception)
+  return True
 
 
 async def health_handler(request: web.Request):
@@ -2390,7 +2544,8 @@ async def start_health_server():
 async def main():
   init_db()
   await start_health_server()
-  print(f"Bot is running on port {PORT}...")
+  await setup_bot_commands()
+  logger.info("Bot is running on port %s...", PORT)
   await dp.start_polling(bot)
 
 
