@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import html
 import logging
 import os
 import re
@@ -308,6 +309,43 @@ def get_conn() -> sqlite3.Connection:
   conn.execute("PRAGMA journal_mode=WAL;")
   conn.execute("PRAGMA synchronous=NORMAL;")
   return conn
+
+
+def format_credential_block(key_val: str) -> str:
+  """User ও Password আলাদা লাইনে বর্ডার দিয়ে স্পষ্টভাবে সাজায়।"""
+  raw = (key_val or "").strip()
+  m = re.search(
+      r"USER\s*[:=\-]?\s*(.+?)\s+(?:PASS|PASSWORD|PW)\s*[:=\-]?\s*(.+)$",
+      raw,
+      flags=re.I,
+  )
+  if m:
+    user_part = html.escape(m.group(1).strip())
+    pass_part = html.escape(m.group(2).strip())
+    return (
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"🔑 <b>USER & PASSWORD:</b>\n"
+        f"<code>USER: {user_part}</code>\n"
+        f"<code>PASS: {pass_part}</code>\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
+    )
+
+  lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+  if len(lines) >= 2:
+    escaped_lines = "\n".join(f"<code>{html.escape(ln)}</code>" for ln in lines)
+    return (
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"🔑 <b>KEY / PASSWORD:</b>\n"
+        f"{escaped_lines}\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
+    )
+
+  return (
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      f"🔑 <b>KEY / PASSWORD:</b>\n"
+      f"<code>{html.escape(raw)}</code>\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
+  )
 
 
 def is_valid_bd_mobile(text: str) -> bool:
@@ -708,9 +746,10 @@ def get_user_info(user_id: int):
 
 def build_welcome_message(full_name: str, lang: str, total_spent: float) -> str:
   _ = total_spent
+  safe_name = html.escape(full_name)
   if lang == "bn":
     return (
-        f"👋 <b>স্বাগতম, {full_name}!</b>\n"
+        f"👋 <b>স্বাগতম, {safe_name}!</b>\n"
         f"✨ <b>ZORO 404 OFFICIAL</b> বটে আপনাকে স্বাগতম।\n\n"
         f"এখান থেকে খুব সহজে আপনার পছন্দের প্ল্যান বেছে নিয়ে অর্ডার করতে পারবেন।\n"
         f"📢 আপডেট চ্যানেল: {CHANNEL_URL}\n"
@@ -718,7 +757,7 @@ def build_welcome_message(full_name: str, lang: str, total_spent: float) -> str:
         f"🛒 শুরু করতে নিচের <b>পাসওয়ার্ড কিনুন</b> বাটনে চাপুন।"
     )
   return (
-      f"👋 <b>Welcome, {full_name}!</b>\n"
+      f"👋 <b>Welcome, {safe_name}!</b>\n"
       f"✨ Welcome to <b>ZORO 404 OFFICIAL</b>.\n\n"
       f"Choose your preferred plan and place an order easily right here.\n"
       f"📢 Update Channel: {CHANNEL_URL}\n"
@@ -952,7 +991,7 @@ async def open_admin_panel(message: Message):
 
   await message.answer(
       f"🛠 <b>ADMIN CONTROL</b> ({SUPPORT_HANDLE})\n"
-      f"━━━━━━━━━━━━━━━━━━━━\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"👥 <b>Total Users:</b> {u_cnt}\n"
       f"📦 <b>Total Products:</b> {p_cnt}\n"
       f"⏳ <b>Pending Orders:</b> {o_cnt}",
@@ -967,7 +1006,7 @@ async def send_support_message(message: Message):
   if lang == "bn":
     msg = (
         f"📞 <b>সাপোর্ট ও যোগাযোগ</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"🔹 <b>টেলিগ্রাম সাপোর্ট:</b> <b>{SUPPORT_HANDLE}</b>\n"
         f"🔹 <b>হোয়াটসঅ্যাপ:</b> <b>{WHATSAPP_NUMBER}</b>\n"
         f"🔹 <b>আপডেট চ্যানেল:</b> {CHANNEL_URL}"
@@ -975,7 +1014,7 @@ async def send_support_message(message: Message):
   else:
     msg = (
         f"📞 <b>SUPPORT & CONTACT</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
         f"🔹 <b>Telegram Support:</b> <b>{SUPPORT_HANDLE}</b>\n"
         f"🔹 <b>WhatsApp:</b> <b>{WHATSAPP_NUMBER}</b>\n"
         f"🔹 <b>Update Channel:</b> {CHANNEL_URL}"
@@ -1133,11 +1172,11 @@ async def cb_select_category(callback: CallbackQuery):
 
   header = (
       f"📂 <b>ক্যাটাগরি: {cat_title}</b>\n"
-      f"━━━━━━━━━━━━━━━━━━━━\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"<b>প্রোডাক্ট সিলেক্ট করুন:</b>"
       if lang == "bn"
       else f"📂 <b>CATEGORY: {cat_title}</b>\n"
-      f"━━━━━━━━━━━━━━━━━━━━\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"<b>SELECT A PRODUCT:</b>"
   )
   await callback.message.edit_text(
@@ -1220,11 +1259,11 @@ async def cb_select_product(callback: CallbackQuery):
 
   title = (
       f"📦 <b>প্রোডাক্ট: {pname}</b>\n"
-      f"━━━━━━━━━━━━━━━━━━━━\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"<b>মেয়াদ ও দাম সিলেক্ট করুন:</b>"
       if lang == "bn"
       else f"📦 <b>PRODUCT: {pname}</b>\n"
-      f"━━━━━━━━━━━━━━━━━━━━\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"<b>SELECT DURATION & PRICE:</b>"
   )
   await callback.message.edit_text(
@@ -1310,17 +1349,17 @@ async def cb_select_plan(callback: CallbackQuery):
       "created_at": created,
   }
 
-  bonus_line = f"\n🎁 <b>অফার:</b> {bonus}" if bonus else ""
+  bonus_line = f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
   if lang == "bn":
     msg = (
         f"🛒 <b>অর্ডার #{oid}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 <b>প্রোডাক্ট:</b> {pname}\n"
-        f"⏱ <b>সময় / মেয়াদ:</b> {duration}{bonus_line}\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"📦 <b>প্রোডাক্ট:</b> {html.escape(pname)}\n"
+        f"⏱ <b>সময় / মেয়াদ:</b> {html.escape(duration)}{bonus_line}\n"
         f"💵 <b>মোট টাকা:</b> <b>৳{final_price:.0f}</b> (Send Money)\n\n"
         f"📲 <b>পেমেন্ট নম্বর:</b>\n"
-        f"• <b>বিকাশ:</b> <code>{bkash_num}</code>\n"
-        f"• <b>নগদ:</b> <code>{nagad_num}</code>\n\n"
+        f"• <b>বিকাশ:</b> <code>{html.escape(bkash_num)}</code>\n"
+        f"• <b>নগদ:</b> <code>{html.escape(nagad_num)}</code>\n\n"
         f"টাকা পাঠানোর পর যেকোনো ১টি দিন:\n"
         f"📸 <b>পেমেন্টের স্ক্রিনশট</b>\n"
         f"অথবা\n"
@@ -1329,13 +1368,13 @@ async def cb_select_plan(callback: CallbackQuery):
   else:
     msg = (
         f"🛒 <b>ORDER #{oid}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📦 <b>PRODUCT:</b> {pname}\n"
-        f"⏱ <b>DURATION:</b> {duration}{bonus_line}\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"📦 <b>PRODUCT:</b> {html.escape(pname)}\n"
+        f"⏱ <b>DURATION:</b> {html.escape(duration)}{bonus_line}\n"
         f"💵 <b>TOTAL AMOUNT:</b> <b>৳{final_price:.0f}</b> (Send Money)\n\n"
         f"📲 <b>PAYMENT NUMBERS:</b>\n"
-        f"• <b>bKash:</b> <code>{bkash_num}</code>\n"
-        f"• <b>Nagad:</b> <code>{nagad_num}</code>\n\n"
+        f"• <b>bKash:</b> <code>{html.escape(bkash_num)}</code>\n"
+        f"• <b>Nagad:</b> <code>{html.escape(nagad_num)}</code>\n\n"
         f"After sending money, send any ONE:\n"
         f"📸 <b>Payment screenshot</b>\n"
         f"OR\n"
@@ -1416,16 +1455,18 @@ async def btn_my_orders(message: Message):
         or ("Screenshot sent" if r["proof_photo_id"] else "-")
     )
     key_txt = (
-        f"\n   🔑 <b>Key/Pass:</b> <code>{r['delivered_key']}</code>"
+        f"\n   🔑 <b>Key/Pass:</b> <code>{html.escape(r['delivered_key'])}</code>"
         if r["delivered_key"]
         else ""
     )
     st_txt = status_label(r["status"], lang).upper()
     paid_amt = float(r["final_amount"] or r["price"] or 0.0)
     lines.append(
-        f"<b>#{r['id']}</b> | <b>{r['name'].upper()}</b> ({(r['duration'] or '').upper()}) —"
-        f" <b>৳{paid_amt:.0f}</b> [{st_txt}]\n"
-        f"   🕒 {r['created_at']} | Proof: {proof_txt}{key_txt}"
+        f"<b>#{r['id']}</b> | <b>{html.escape(r['name'].upper())}</b>"
+        f" ({html.escape((r['duration'] or '').upper())}) —"
+        f" <b>৳{paid_amt:.0f}</b> [{html.escape(st_txt)}]\n"
+        f"   🕒 {html.escape(r['created_at'])} | Proof:"
+        f" {html.escape(proof_txt)}{key_txt}"
     )
   await message.answer(
       "\n\n".join(lines), parse_mode="HTML", reply_markup=update_channel_kb()
@@ -1494,6 +1535,17 @@ def finalize_order_approval(oid: int, key_val: str):
   return target_uid, new_spent, old_vip_tier, new_vip_tier
 
 
+async def deliver_approved_key_message(target_uid: int, oid: int, key_val: str):
+  cred_block = format_credential_block(key_val)
+  await bot.send_message(
+      target_uid,
+      f"✅ <b>আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!</b>\n"
+      f"{cred_block}",
+      parse_mode="HTML",
+      reply_markup=update_channel_kb(),
+  )
+
+
 @dp.message(Command("key"))
 async def cmd_admin_key(message: Message):
   if message.from_user.id != ADMIN_ID:
@@ -1531,21 +1583,14 @@ async def cmd_admin_key(message: Message):
   if admin_states.get(ADMIN_ID, {}).get("order_id") == oid:
     admin_states.pop(ADMIN_ID, None)
 
-  # পাসওয়ার্ড দেওয়ার সময় JOIN UPDATE CHANNEL বাটন থাকবে
+  # পাসওয়ার্ড দেওয়ার সময় JOIN UPDATE CHANNEL বাটন ও স্পষ্ট আলাদা বর্ডার থাকবে
   try:
-    await bot.send_message(
-        target_uid,
-        f"✅ <b>আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔑 <b>Key / Password:</b> <code>{key_val}</code>",
-        parse_mode="HTML",
-        reply_markup=update_channel_kb(),
-    )
+    await deliver_approved_key_message(target_uid, oid, key_val)
   except Exception:
     pass
 
   await message.answer(
-      f"✅ Order #{oid} APPROVED!\n🔑 Sent Key/Password: {key_val}"
+      f"✅ Order #{oid} APPROVED!\n🔑 Sent Key/Password:\n{key_val}"
   )
 
 
@@ -1571,7 +1616,7 @@ async def cmd_admin_report(message: Message):
   total_sales = float(app_ord["amt"] or 0.0)
   await message.answer(
       f"📊 <b>সেলস রিপোর্ট</b>\n"
-      f"━━━━━━━━━━━━━━━━━━━━\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"• <b>এপ্রুভড অর্ডার:</b> {app_ord['cnt']} টি (<b>৳{total_sales:.0f}</b>)\n"
       f"• <b>পেন্ডিং অর্ডার:</b> {pend_ord} টি\n"
       f"• <b>রিজেক্টেড অর্ডার:</b> {rej_ord} টি",
@@ -1609,7 +1654,7 @@ async def cb_adm_report(callback: CallbackQuery):
   total_sales = float(app_ord["amt"] or 0.0)
   report_txt = (
       f"📊 <b>সেলস রিপোর্ট</b>\n"
-      f"━━━━━━━━━━━━━━━━━━━━\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"• <b>এপ্রুভড অর্ডার:</b> {app_ord['cnt']} টি (<b>৳{total_sales:.0f}</b>)\n"
       f"• <b>পেন্ডিং অর্ডার:</b> {pend_ord} টি\n"
       f"• <b>রিজেক্টেড অর্ডার:</b> {rej_ord} টি"
@@ -1625,8 +1670,8 @@ async def cb_adm_paynums(callback: CallbackQuery):
   bkash_num, nagad_num = get_payment_numbers()
   await callback.message.answer(
       f"💳 <b>বর্তমান পেমেন্ট নম্বর:</b>\n"
-      f"• <b>বিকাশ:</b> <code>{bkash_num}</code>\n"
-      f"• <b>নগদ:</b> <code>{nagad_num}</code>\n\n"
+      f"• <b>বিকাশ:</b> <code>{html.escape(bkash_num)}</code>\n"
+      f"• <b>নগদ:</b> <code>{html.escape(nagad_num)}</code>\n\n"
       f"যে নম্বরটি বদলাতে চান নিচের বাটনে চাপুন:",
       parse_mode="HTML",
       reply_markup=payment_numbers_kb(),
@@ -1681,8 +1726,9 @@ async def cb_adm_users(callback: CallbackQuery):
     sp = float(r["total_spent"] or 0.0)
     vp = get_vip_discount_pct(sp)
     lines.append(
-        f"• <code>{r['user_id']}</code> | <b>{r['full_name']}</b> ({r['username']}) | "
-        f"Spent: <b>৳{sp:.0f}</b> (VIP {vp:.0f}%) | 🕒 {r['joined_at']}"
+        f"• <code>{r['user_id']}</code> | <b>{html.escape(r['full_name'])}</b>"
+        f" ({html.escape(r['username'])}) | Spent: <b>৳{sp:.0f}</b> (VIP"
+        f" {vp:.0f}%) | 🕒 {html.escape(r['joined_at'])}"
     )
   await callback.message.answer("\n".join(lines), parse_mode="HTML")
   await callback.answer()
@@ -2050,21 +2096,14 @@ async def handle_messages(message: Message):
         await message.answer("অর্ডার পাওয়া যায়নি।")
         return
 
-      # পাসওয়ার্ড দেওয়ার সময় JOIN UPDATE CHANNEL বাটন থাকবে
+      # পাসওয়ার্ড দেওয়ার সময় JOIN UPDATE CHANNEL বাটন ও স্পষ্ট আলাদা বর্ডার থাকবে
       try:
-        await bot.send_message(
-            target_uid,
-            f"✅ <b>আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!</b>\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔑 <b>Key / Password:</b> <code>{key_val}</code>",
-            parse_mode="HTML",
-            reply_markup=update_channel_kb(),
-        )
+        await deliver_approved_key_message(target_uid, oid, key_val)
       except Exception:
         pass
 
       await message.answer(
-          f"✅ Order #{oid} APPROVED!\n🔑 Sent Key/Password: {key_val}"
+          f"✅ Order #{oid} APPROVED!\n🔑 Sent Key/Password:\n{key_val}"
       )
       return
 
