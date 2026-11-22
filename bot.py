@@ -37,6 +37,15 @@ CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/zoro404ofc")
 DB_PATH = os.getenv("DB_PATH", "store_v9.db")
 PORT = int(os.getenv("PORT", "8080"))
 
+# Dolphin Reseller API Config
+DOLPHIN_BASE_URL = os.getenv(
+    "DOLPHIN_BASE_URL", "https://dolphinbot.catchmeifyoucan.org"
+).rstrip("/")
+DOLPHIN_RESELLER_KEY = os.getenv(
+    "DOLPHIN_RESELLER_KEY", "dres_c7c78682ab970b56ee9821f4a991495979765395"
+)
+DOLPHIN_USER_AGENT = os.getenv("DOLPHIN_USER_AGENT", "paymentdolphin0234432")
+
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 DEFAULT_BKASH = "01862849299"
@@ -312,6 +321,10 @@ def get_conn() -> sqlite3.Connection:
   return conn
 
 
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+
 async def safe_delete_message(chat_id: int, message_id: int | None):
   if not message_id:
     return
@@ -326,13 +339,217 @@ async def safe_delete_messages(chat_id: int, message_ids: list[int | None]):
     await safe_delete_message(chat_id, mid)
 
 
+# ==========================================
+# DOLPHIN OWNERSHIP LOCK & API CLIENT
+# ==========================================
+def extract_key_tokens(raw_text: str) -> list[str]:
+  """
+    ডেলিভার করা পাসওয়ার্ড/কি থেকে মূল কি-ভ্যালুগুলো বের করে,
+    যাতে 'USER: abc PASS: xyz' বা শুধু 'xyz' যেভাবেই দেওয়া হোক সঠিকভাবে লক ও যাচাই হয়।
+    """
+  cleaned = (raw_text or "").strip()
+  if not cleaned:
+    return []
+
+  tokens = [cleaned]
+  m = re.search(
+      r"USER\s*[:=\-]?\s*(.+?)\s+(?:PASS|PASSWORD|PW)\s*[:=\-]?\s*(.+)$",
+      cleaned,
+      flags=re.I,
+  )
+  if m:
+    u_val = m.group(1).strip()
+    p_val = m.group(2).strip()
+    if u_val:
+      tokens.append(u_val)
+    if p_val:
+      tokens.append(p_val)
+
+  val_after_prefix = re.sub(
+      r"^(?:USER|PASS|PASSWORD|PW|KEY)\s*[:=\-]?\s*",
+      "",
+      cleaned,
+      flags=re.I,
+  ).strip()
+  if val_after_prefix and val_after_prefix not in tokens:
+    tokens.append(val_after_prefix)
+
+  return tokens
+
+
+def assign_key_ownership(
+    raw_key_text: str, owner_user_id: int, product_name: str = "DOLPHIN"
+):
+  """
+    যে অ্যাকাউন্ট (`owner_user_id`) দিয়ে কি/পাসওয়ার্ড কেনা বা নেওয়া হয়েছে,
+    শুধুমাত্র সেই অ্যাকাউন্টের সাথে লক করে।
+    """
+  tokens = extract_key_tokens(raw_key_text)
+  if not tokens or not owner_user_id:
+    return
+
+  conn = get_conn()
+  cur = conn.cursor()
+  ts = now_str()
+  for tok in tokens:
+    cur.execute(
+        """
+            INSERT INTO key_ownership (key_value, owner_user_id, product_name, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key_value) DO UPDATE SET
+                owner_user_id = CASE
+                    WHEN key_ownership.owner_user_id = 0 THEN excluded.owner_user_id
+                    ELSE key_ownership.owner_user_id
+                END,
+                product_name = excluded.product_name
+            """,
+        (tok, int(owner_user_id), product_name, ts),
+    )
+  conn.commit()
+  conn.close()
+
+
+def verify_key_ownership(
+    submitted_key: str, requester_user_id: int
+) -> tuple[bool, str]:
+  """
+    যাচাই করে যে কি/পাসওয়ার্ডটি এই `requester_user_id`-এর অ্যাকাউন্ট দিয়ে নেওয়া কি না।
+    অন্য কারও কি হলে আটকে দেয়।
+    """
+  clean_k = (submitted_key or "").strip()
+  if not clean_k:
+    return False, "❌ সঠিক কি বা পাসওয়ার্ড দিন।"
+
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute(
+      """
+        SELECT owner_user_id FROM key_ownership
+        WHERE key_value = ? OR LOWER(key_value) = LOWER(?)
+        ORDER BY id DESC LIMIT 1
+        """,
+      (clean_k, clean_k),
+  )
+  row = cur.fetchone()
+  conn.close()
+
+  if not row:
+    return (
+        False,
+        "❌ এই কি বা পাসওয়ার্ডটি আপনার অ্যাকাউন্টের সাথে যুক্ত নয় অথবা সিস্টেমে রেকর্ড নেই। যে অ্যাকাউন্ট দিয়ে কেনা হয়েছে, সেই অ্যাকাউন্ট থেকে চেষ্টা করুন।",
+    )
+
+  owner_id = int(row["owner_user_id"] or 0)
+  if owner_id != int(requester_user_id):
+    return (
+        False,
+        "🔒 <b>অ্যাক্সেস লক করা আছে!</b>\nএই কি বা পাসওয়ার্ডটি অন্য অ্যাকাউন্টের সাথে যুক্ত। যে অ্যাকাউন্ট দিয়ে এটি কেনা হয়েছে, শুধু সেই অ্যাকাউন্ট থেকেই রিসেট করা যাবে।",
+    )
+
+  return True, "OK"
+
+
+def get_dolphin_headers() -> dict[str, str]:
+  return {
+      "User-Agent": DOLPHIN_USER_AGENT,
+      "X-Reseller-Key": DOLPHIN_RESELLER_KEY,
+      "Content-Type": "application/json",
+  }
+
+
+async def dolphin_reset_hwid_api(key_val: str) -> tuple[bool, str]:
+  url = f"{DOLPHIN_BASE_URL}/api/v1/reseller/reset-hwid"
+  payload = {"key": key_val.strip()}
+  timeout = aiohttp.ClientTimeout(total=20)
+
+  try:
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+      async with session.post(
+          url, headers=get_dolphin_headers(), json=payload
+      ) as resp:
+        raw_txt = await resp.text()
+        try:
+          data = await resp.json()
+        except Exception:
+          data = {"raw": raw_txt}
+
+        if 200 <= resp.status < 300:
+          ok_flag = True
+          if isinstance(data, dict) and "success" in data:
+            ok_flag = bool(data["success"])
+          msg = (
+              data.get("message")
+              or data.get("detail")
+              or "HWID সফলভাবে রিসেট করা হয়েছে।"
+              if isinstance(data, dict)
+              else "HWID সফলভাবে রিসেট করা হয়েছে।"
+          )
+          return ok_flag, str(msg)
+
+        err_msg = (
+            data.get("message")
+            or data.get("detail")
+            or data.get("error")
+            or f"রিসেট ব্যর্থ হয়েছে (HTTP {resp.status})"
+            if isinstance(data, dict)
+            else f"রিসেট ব্যর্থ হয়েছে (HTTP {resp.status})"
+        )
+        return False, str(err_msg)
+
+  except asyncio.TimeoutError:
+    return (
+        False,
+        "⏳ সার্ভার রেসপন্স করতে বেশি সময় নিচ্ছে। একটু পর আবার চেষ্টা করুন।",
+    )
+  except Exception as exc:
+    logger.warning("Dolphin reset API error: %s", exc)
+    return False, "🌐 API সংযোগে সমস্যা হয়েছে। একটু পর আবার চেষ্টা করুন।"
+
+
+async def dolphin_claim_key_api(
+    key_val: str, customer_chat_id: int
+) -> tuple[bool, str]:
+  url = f"{DOLPHIN_BASE_URL}/api/v1/reseller/claim-key"
+  payload = {
+      "key": key_val.strip(),
+      "customer_chat_id": int(customer_chat_id),
+  }
+  timeout = aiohttp.ClientTimeout(total=20)
+
+  try:
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+      async with session.post(
+          url, headers=get_dolphin_headers(), json=payload
+      ) as resp:
+        try:
+          data = await resp.json()
+        except Exception:
+          data = {}
+
+        if 200 <= resp.status < 300:
+          msg = (
+              data.get("message") or "কি সফলভাবে ক্লেইম করা হয়েছে।"
+              if isinstance(data, dict)
+              else "কি সফলভাবে ক্লেইম করা হয়েছে।"
+          )
+          return True, str(msg)
+
+        err_msg = (
+            data.get("message")
+            or data.get("detail")
+            or f"ক্লেইম ব্যর্থ হয়েছে (HTTP {resp.status})"
+            if isinstance(data, dict)
+            else f"ক্লেইম ব্যর্থ হয়েছে (HTTP {resp.status})"
+        )
+        return False, str(err_msg)
+  except Exception as exc:
+    logger.warning("Dolphin claim API error: %s", exc)
+    return False, "🌐 ক্লেইম করতে সমস্যা হয়েছে।"
+
+
 def build_approved_order_message(
     oid: int, pname: str, duration: str, key_val: str, lang: str = "bn"
 ) -> str:
-  """
-    শুধুমাত্র ইউজারনেম ও পাসওয়ার্ডের আসল মান <code>...</code> বক্সে রাখে,
-    যাতে ট্যাপ করলে টাইটেল/লেবেল কপি না হয়ে শুধু ইউজার বা পাসওয়ার্ড কপি হয়।
-    """
   raw = (key_val or "").strip()
   safe_prod = html.escape((pname or "PANEL").upper())
   safe_dur = html.escape((duration or "").upper())
@@ -628,6 +845,15 @@ def init_db():
             nagad TEXT DEFAULT ''
         )
         """)
+  cur.execute("""
+        CREATE TABLE IF NOT EXISTS key_ownership (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key_value TEXT UNIQUE NOT NULL,
+            owner_user_id INTEGER NOT NULL,
+            product_name TEXT DEFAULT 'DOLPHIN',
+            created_at TEXT DEFAULT ''
+        )
+        """)
 
   cur.execute("PRAGMA table_info(users)")
   u_cols = [c["name"] for c in cur.fetchall()]
@@ -662,6 +888,25 @@ def init_db():
         "INSERT INTO payment_settings (id, bkash, nagad) VALUES (1, ?, ?)",
         (DEFAULT_BKASH, DEFAULT_NAGAD),
     )
+
+  # আগে অ্যাপ্রুভ হওয়া অর্ডারগুলোর মালিকানাও অটোমেটিক লক করে রাখা হচ্ছে
+  cur.execute("""
+        SELECT o.user_id, o.delivered_key, p.name
+        FROM orders o
+        JOIN plans pl ON o.plan_id = pl.id
+        JOIN products p ON pl.product_id = p.id
+        WHERE o.status = 'approved' AND TRIM(COALESCE(o.delivered_key, '')) != ''
+        """)
+  for old_ord in cur.fetchall():
+    ts = now_str()
+    for tok in extract_key_tokens(old_ord["delivered_key"]):
+      cur.execute(
+          """
+                INSERT OR IGNORE INTO key_ownership (key_value, owner_user_id, product_name, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+          (tok, int(old_ord["user_id"]), old_ord["name"] or "DOLPHIN", ts),
+      )
 
   cur.execute("""
         UPDATE users
@@ -815,18 +1060,18 @@ def build_welcome_message(full_name: str, lang: str) -> str:
     return (
         f"👋 <b>স্বাগতম, {safe_name}!</b>\n"
         f"✨ <b>ZORO 404 OFFICIAL</b> বটে আপনাকে স্বাগতম।\n\n"
-        f"এখান থেকে সহজে আপনার পছন্দের প্ল্যান বেছে নিয়ে অর্ডার করতে পারবেন।\n"
+        f"এখান থেকে সহজে আপনার পছন্দের প্ল্যান বেছে নিয়ে অর্ডার করতে পারবেন এবং নিজের কি রিসেট করতে পারবেন।\n"
         f"📢 আপডেট চ্যানেল: {ch_link}\n"
         f"💬 সাপোর্ট: <b>{html.escape(SUPPORT_HANDLE)}</b>\n\n"
-        f"🛒 শুরু করতে নিচের <b>পাসওয়ার্ড কিনুন</b> বাটনে চাপুন।"
+        f"🛒 শুরু করতে নিচের <b>পাসওয়ার্ড কিনুন</b> বা <b>রিসেট সিস্টেম</b> বাটনে চাপুন।"
     )
   return (
       f"👋 <b>Welcome, {safe_name}!</b>\n"
       f"✨ Welcome to <b>ZORO 404 OFFICIAL</b>.\n\n"
-      f"Choose your plan and place an order easily right here.\n"
+      f"Choose your plan to order or reset your own key safely.\n"
       f"📢 Update Channel: {ch_link}\n"
       f"💬 Support: <b>{html.escape(SUPPORT_HANDLE)}</b>\n\n"
-      f"🛒 Tap <b>Buy Keys</b> below to get started."
+      f"🛒 Tap <b>Buy Keys</b> or <b>Reset System</b> below to get started."
   )
 
 
@@ -870,6 +1115,43 @@ def cancel_order_kb(oid: int, lang: str = "bn") -> InlineKeyboardMarkup:
   ]])
 
 
+def reset_menu_kb(lang: str = "bn") -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(
+      inline_keyboard=[
+          [
+              InlineKeyboardButton(
+                  text="🐬 DOLPHIN RESET", callback_data="reset_dolphin"
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="❌ বন্ধ করুন" if lang == "bn" else "❌ CLOSE",
+                  callback_data="reset_close",
+              ),
+          ],
+      ]
+  )
+
+
+def back_to_reset_kb(lang: str = "bn") -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(
+      inline_keyboard=[
+          [
+              InlineKeyboardButton(
+                  text="⬅️ রিসেট মেনু" if lang == "bn" else "⬅️ RESET MENU",
+                  callback_data="open_reset_menu",
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="❌ বন্ধ করুন" if lang == "bn" else "❌ CLOSE",
+                  callback_data="reset_close",
+              ),
+          ],
+      ]
+  )
+
+
 def category_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[
@@ -904,10 +1186,13 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
     rows = [
         [
             KeyboardButton(text="🛒 Buy Keys"),
-            KeyboardButton(text="📦 My Orders"),
+            KeyboardButton(text="🔄 Reset System"),
         ],
         [
+            KeyboardButton(text="📦 My Orders"),
             KeyboardButton(text="🌐 Change Language"),
+        ],
+        [
             KeyboardButton(text="📞 Support"),
         ],
     ]
@@ -915,10 +1200,13 @@ def main_menu(user_id: int, lang: str) -> ReplyKeyboardMarkup:
     rows = [
         [
             KeyboardButton(text="🛒 পাসওয়ার্ড কিনুন"),
-            KeyboardButton(text="📦 আমার অর্ডার"),
+            KeyboardButton(text="🔄 রিসেট সিস্টেম"),
         ],
         [
+            KeyboardButton(text="📦 আমার অর্ডার"),
             KeyboardButton(text="🌐 ভাষা পরিবর্তন"),
+        ],
+        [
             KeyboardButton(text="📞 সাপোর্ট"),
         ],
     ]
@@ -1013,20 +1301,18 @@ def order_approve_start_kb(oid: int) -> InlineKeyboardMarkup:
   ]])
 
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-
 async def setup_bot_commands():
   user_commands = [
       BotCommand(command="start", description="বট শুরু / মেনু খুলুন"),
       BotCommand(command="buy", description="পাসওয়ার্ড / কি কিনুন"),
+      BotCommand(command="reset", description="নিজের কি রিসেট করুন"),
       BotCommand(command="orders", description="আমার অর্ডার দেখুন"),
       BotCommand(command="support", description="সাপোর্ট ও যোগাযোগ"),
   ]
   admin_commands = user_commands + [
       BotCommand(command="admin", description="অ্যাডমিন কন্ট্রোল প্যানেল"),
       BotCommand(command="key", description="অর্ডার এপ্রুভ ও Key পাঠান"),
+      BotCommand(command="assign", description="কাস্টমার আইডিতে কি লক করুন"),
       BotCommand(command="report", description="সেলস রিপোর্ট দেখুন"),
   ]
   try:
@@ -1036,6 +1322,33 @@ async def setup_bot_commands():
     )
   except Exception as exc:
     logger.warning("Failed to set bot commands: %s", exc)
+
+
+async def open_reset_menu(message: Message):
+  uid = message.from_user.id
+  prev_usr = user_states.get(uid) or {}
+  await safe_delete_message(uid, prev_usr.get("reset_prompt_msg_id"))
+  user_states.pop(uid, None)
+
+  _, _, lang, _, _, _ = get_user_info(uid)
+  txt = (
+      "🔄 <b>রিসেট সিস্টেম</b>\n"
+      "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      "আপনার নিজের কেনা পাসওয়ার্ড বা কি রিসেট করতে নিচের বাটন বেছে নিন:\n"
+      "🔒 <i>যে অ্যাকাউন্ট দিয়ে কি নেওয়া হয়েছে, শুধু সেই অ্যাকাউন্ট থেকেই রিসেট করা যাবে।</i>"
+      if lang == "bn"
+      else "🔄 <b>RESET SYSTEM</b>\n"
+      "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      "Select a panel below to reset your own key/password:\n"
+      "🔒 <i>Only the account that purchased/linked the key can reset it.</i>"
+  )
+  sent = await message.answer(
+      txt, parse_mode="HTML", reply_markup=reset_menu_kb(lang)
+  )
+  user_states[uid] = {
+      "step": "reset_menu",
+      "reset_prompt_msg_id": sent.message_id,
+  }
 
 
 async def open_admin_panel(message: Message):
@@ -1110,6 +1423,93 @@ async def cmd_admin(message: Message):
   await open_admin_panel(message)
 
 
+@dp.message(Command("reset"))
+async def cmd_reset(message: Message):
+  await open_reset_menu(message)
+
+
+@dp.message(Command("assign"))
+async def cmd_assign_key(message: Message):
+  if message.from_user.id != ADMIN_ID:
+    return
+  parts = (message.text or "").strip().split(maxsplit=2)
+  if len(parts) < 3:
+    await message.answer("ব্যবহার: <code>/assign user_id key_value</code>", parse_mode="HTML")
+    return
+  try:
+    target_uid = int(parts[1].strip())
+  except ValueError:
+    await message.answer("❌ সঠিক সংখ্যাযুক্ত User ID দিন।")
+    return
+  key_val = parts[2].strip()
+  assign_key_ownership(key_val, target_uid, product_name="DOLPHIN")
+  await safe_delete_message(ADMIN_ID, message.message_id)
+  done = await message.answer(
+      f"✅ কি সফলভাবে ইউজার <code>{target_uid}</code>-এর অ্যাকাউন্টের সাথে লক করা হয়েছে।",
+      parse_mode="HTML",
+  )
+  await asyncio.sleep(3)
+  await safe_delete_message(ADMIN_ID, done.message_id)
+
+
+@dp.message(Command("claim"))
+async def cmd_claim_key(message: Message):
+  uid = message.from_user.id
+  _, _, lang, _, _, _ = get_user_info(uid)
+  parts = (message.text or "").strip().split(maxsplit=1)
+  await safe_delete_message(uid, message.message_id)
+
+  if uid == ADMIN_ID:
+    await message.answer(
+        "⚠️ অ্যাডমিন/রিসেলার অ্যাকাউন্ট দিয়ে কাস্টমার কি ক্লেইম করা যাবে না। লক করতে <code>/assign user_id key</code> ব্যবহার করুন।",
+        parse_mode="HTML",
+    )
+    return
+
+  if len(parts) < 2 or not parts[1].strip():
+    await message.answer(
+        "ব্যবহার: <code>/claim আপনার_Dolphin_Key</code>"
+        if lang == "bn"
+        else "Usage: <code>/claim your_Dolphin_Key</code>",
+        parse_mode="HTML",
+    )
+    return
+
+  key_val = parts[1].strip()
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute(
+      "SELECT owner_user_id FROM key_ownership WHERE key_value = ? ORDER BY id DESC LIMIT 1",
+      (key_val,),
+  )
+  row = cur.fetchone()
+  conn.close()
+
+  if row and int(row["owner_user_id"] or 0) not in (0, uid):
+    await message.answer(
+        "🔒 <b>এই কি-টি ইতিমধ্যে অন্য একটি অ্যাকাউন্টের সাথে যুক্ত আছে।</b>"
+        if lang == "bn"
+        else "🔒 <b>This key is already linked to another account.</b>",
+        parse_mode="HTML",
+    )
+    return
+
+  ok, api_msg = await dolphin_claim_key_api(key_val, uid)
+  if not ok:
+    await message.answer(
+        f"❌ {html.escape(api_msg)}", parse_mode="HTML"
+    )
+    return
+
+  assign_key_ownership(key_val, uid, product_name="DOLPHIN")
+  await message.answer(
+      "✅ <b>কি সফলভাবে আপনার অ্যাকাউন্টের সাথে লক হয়েছে!</b>\nএখন থেকে শুধু আপনার এই অ্যাকাউন্ট থেকেই রিসেট করতে পারবেন।"
+      if lang == "bn"
+      else "✅ <b>Key locked to your account!</b>\nOnly this account can reset it now.",
+      parse_mode="HTML",
+  )
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
   uid = message.from_user.id
@@ -1122,7 +1522,12 @@ async def cmd_start(message: Message):
   prev_usr = user_states.pop(uid, None)
   if prev_usr:
     await safe_delete_messages(
-        uid, [prev_usr.get("order_msg_id"), prev_usr.get("submitted_msg_id")]
+        uid,
+        [
+            prev_usr.get("order_msg_id"),
+            prev_usr.get("submitted_msg_id"),
+            prev_usr.get("reset_prompt_msg_id"),
+        ],
     )
 
   (
@@ -1152,7 +1557,6 @@ async def cmd_start(message: Message):
     except Exception:
       pass
 
-  # /start দিলে শুধু ভাষা বেছে নেওয়ার মেসেজ যাবে; ভাষা সিলেক্ট করলে ওয়েলকাম মেসেজ যাবে
   await message.answer(
       "<b>ভাষা বেছে নিন / Choose Language:</b>",
       parse_mode="HTML",
@@ -1193,6 +1597,75 @@ async def btn_change_lang(message: Message):
       parse_mode="HTML",
       reply_markup=lang_kb(),
   )
+
+
+@dp.message(F.text.in_(["🔄 রিসেট সিস্টেম", "🔄 Reset System"]))
+async def btn_reset_system(message: Message):
+  await open_reset_menu(message)
+
+
+@dp.callback_query(F.data == "open_reset_menu")
+async def cb_open_reset_menu(callback: CallbackQuery):
+  uid = callback.from_user.id
+  _, _, lang, _, _, _ = get_user_info(uid)
+  user_states[uid] = {
+      "step": "reset_menu",
+      "reset_prompt_msg_id": callback.message.message_id,
+  }
+  txt = (
+      "🔄 <b>রিসেট সিস্টেম</b>\n"
+      "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      "আপনার নিজের কেনা পাসওয়ার্ড বা কি রিসেট করতে নিচের বাটন বেছে নিন:\n"
+      "🔒 <i>যে অ্যাকাউন্ট দিয়ে কি নেওয়া হয়েছে, শুধু সেই অ্যাকাউন্ট থেকেই রিসেট করা যাবে।</i>"
+      if lang == "bn"
+      else "🔄 <b>RESET SYSTEM</b>\n"
+      "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      "Select a panel below to reset your own key/password:\n"
+      "🔒 <i>Only the account that purchased/linked the key can reset it.</i>"
+  )
+  await callback.message.edit_text(
+      txt, parse_mode="HTML", reply_markup=reset_menu_kb(lang)
+  )
+  await callback.answer()
+
+
+@dp.callback_query(F.data == "reset_dolphin")
+async def cb_reset_dolphin(callback: CallbackQuery):
+  uid = callback.from_user.id
+  _, _, lang, _, _, _ = get_user_info(uid)
+
+  user_states[uid] = {
+      "step": "wait_dolphin_reset_key",
+      "reset_prompt_msg_id": callback.message.message_id,
+  }
+
+  txt = (
+      "🐬 <b>DOLPHIN HWID RESET</b>\n"
+      "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      "আপনার <b>Dolphin পাসওয়ার্ড বা কি</b> লিখে পাঠান।\n\n"
+      "🔒 <b>নিরাপত্তা লক:</b> যে অ্যাকাউন্ট দিয়ে এই কি কেনা হয়েছে, শুধু সেই অ্যাকাউন্ট থেকেই রিসেট করা যাবে।"
+      if lang == "bn"
+      else "🐬 <b>DOLPHIN HWID RESET</b>\n"
+      "▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      "Send your <b>Dolphin password or key</b>.\n\n"
+      "🔒 <b>Ownership Lock:</b> Only the account that purchased this key can reset it."
+  )
+  await callback.message.edit_text(
+      txt, parse_mode="HTML", reply_markup=back_to_reset_kb(lang)
+  )
+  await callback.answer()
+
+
+@dp.callback_query(F.data == "reset_close")
+async def cb_reset_close(callback: CallbackQuery):
+  uid = callback.from_user.id
+  if user_states.get(uid, {}).get("step") in (
+      "reset_menu",
+      "wait_dolphin_reset_key",
+  ):
+    user_states.pop(uid, None)
+  await safe_delete_message(uid, callback.message.message_id)
+  await callback.answer()
 
 
 @dp.message(
@@ -1634,6 +2107,10 @@ def finalize_order_approval(oid: int, key_val: str):
 
   conn.commit()
   conn.close()
+
+  # ক্রেতার অ্যাকাউন্টের সাথে পাসওয়ার্ড/কি লক করা হচ্ছে
+  assign_key_ownership(key_val, target_uid, product_name=prod_name or "DOLPHIN")
+
   return target_uid, prod_name, duration, user_lang
 
 
@@ -2500,6 +2977,60 @@ async def handle_messages(message: Message):
     ustate = user_states[uid]
     _, _, lang, _, _, _ = get_user_info(uid)
     step = ustate.get("step")
+
+    if step == "wait_dolphin_reset_key":
+      if not txt:
+        return
+      reset_prompt_id = ustate.get("reset_prompt_msg_id")
+      user_states.pop(uid, None)
+
+      # চ্যাট পরিষ্কার রাখতে ইউজারের পাঠানো পাসওয়ার্ড/কি ও পুরোনো প্রম্পট ডিলিট করা হচ্ছে
+      await safe_delete_messages(uid, [message.message_id, reset_prompt_id])
+
+      processing_msg = await message.answer(
+          "⏳ <b>আপনার অ্যাকাউন্টের মালিকানা যাচাই ও HWID রিসেট হচ্ছে...</b>"
+          if lang == "bn"
+          else "⏳ <b>Verifying ownership & resetting HWID...</b>",
+          parse_mode="HTML",
+      )
+
+      allowed, lock_msg = verify_key_ownership(txt, uid)
+      await safe_delete_message(uid, processing_msg.message_id)
+
+      if not allowed:
+        await message.answer(
+            lock_msg,
+            parse_mode="HTML",
+            reply_markup=back_to_reset_kb(lang),
+        )
+        return
+
+      ok, api_msg = await dolphin_reset_hwid_api(txt)
+      if ok:
+        done_txt = (
+            f"✅ <b>DOLPHIN HWID রিসেট সফল হয়েছে!</b>\n\n"
+            f"📌 <b>স্ট্যাটাস:</b> {html.escape(api_msg)}\n"
+            f"🔒 আপনার অ্যাকাউন্টের সুরক্ষা বজায় রাখা হয়েছে।"
+            if lang == "bn"
+            else f"✅ <b>DOLPHIN HWID RESET SUCCESSFUL!</b>\n\n"
+            f"📌 <b>Status:</b> {html.escape(api_msg)}\n"
+            f"🔒 Your account lock is active."
+        )
+      else:
+        done_txt = (
+            f"❌ <b>DOLPHIN HWID রিসেট করা যায়নি</b>\n\n"
+            f"📌 <b>কারণ:</b> {html.escape(api_msg)}"
+            if lang == "bn"
+            else f"❌ <b>DOLPHIN HWID RESET FAILED</b>\n\n"
+            f"📌 <b>Reason:</b> {html.escape(api_msg)}"
+        )
+
+      await message.answer(
+          done_txt,
+          parse_mode="HTML",
+          reply_markup=back_to_reset_kb(lang),
+      )
+      return
 
     if step == "wait_proof":
       has_photo = bool(message.photo)
