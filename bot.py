@@ -311,9 +311,15 @@ def get_conn() -> sqlite3.Connection:
   return conn
 
 
-def format_credential_block(key_val: str) -> str:
-  """User ও Password আলাদা লাইনে বর্ডার দিয়ে স্পষ্টভাবে সাজায়।"""
+def build_approved_order_message(
+    oid: int, pname: str, duration: str, key_val: str, lang: str = "bn"
+) -> str:
+  """ইউজারের সেট করা ভাষা অনুযায়ী প্যানেলের নাম, মেয়াদ ও ইউজার/পাসওয়ার্ড সাজায়।"""
   raw = (key_val or "").strip()
+  safe_prod = html.escape((pname or "PANEL").upper())
+  safe_dur = html.escape((duration or "").upper())
+  dur_part = f" ({safe_dur})" if safe_dur else ""
+
   m = re.search(
       r"USER\s*[:=\-]?\s*(.+?)\s+(?:PASS|PASSWORD|PW)\s*[:=\-]?\s*(.+)$",
       raw,
@@ -322,29 +328,37 @@ def format_credential_block(key_val: str) -> str:
   if m:
     user_part = html.escape(m.group(1).strip())
     pass_part = html.escape(m.group(2).strip())
-    return (
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🔑 <b>USER & PASSWORD:</b>\n"
-        f"<code>USER: {user_part}</code>\n"
-        f"<code>PASS: {pass_part}</code>\n"
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
-    )
+    cred_lines = f"<code>USER: {user_part}</code>\n\n<code>PASS: {pass_part}</code>"
+  else:
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if len(lines) >= 2:
+      cred_lines = "\n\n".join(
+          f"<code>{html.escape(ln)}</code>" for ln in lines
+      )
+    else:
+      cred_lines = f"<code>{html.escape(raw)}</code>"
 
-  lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-  if len(lines) >= 2:
-    escaped_lines = "\n".join(f"<code>{html.escape(ln)}</code>" for ln in lines)
+  if lang == "en":
     return (
+        f"✅ <b>Your Order #{oid} is Approved!</b>\n\n"
+        f"📦 <b>Panel:</b> <b>{safe_prod}{dur_part}</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🔑 <b>KEY / PASSWORD:</b>\n"
-        f"{escaped_lines}\n"
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
+        f"🔑 <b>USER & PASSWORD FOR THIS PANEL (SEE BELOW):</b>\n\n"
+        f"{cred_lines}\n\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"👉 <b>The text inside the box above is your User & Password. Tap to"
+        f" copy.</b>"
     )
 
   return (
+      f"✅ <b>আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!</b>\n\n"
+      f"📦 <b>প্যানেল:</b> <b>{safe_prod}{dur_part}</b>\n"
       f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-      f"🔑 <b>KEY / PASSWORD:</b>\n"
-      f"<code>{html.escape(raw)}</code>\n"
-      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬"
+      f"🔑 <b>এই প্যানেলের ইউজার ও পাসওয়ার্ড (নিচে দেখুন):</b>\n\n"
+      f"{cred_lines}\n\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      f"👉 <b>ওপরের বক্সে দেওয়া লেখাটাই আপনার ইউজার ও পাসওয়ার্ড। চাপ দিলে কপি হয়ে"
+      f" যাবে।</b>"
   )
 
 
@@ -1486,9 +1500,12 @@ def finalize_order_approval(oid: int, key_val: str):
   cur = conn.cursor()
   cur.execute(
       """
-        SELECT o.id, o.user_id, o.plan_id, o.final_amount, o.discount_used_pct, o.status, pl.price
+        SELECT o.id, o.user_id, o.plan_id, o.final_amount, o.discount_used_pct,
+               o.status, pl.price, pl.duration, p.name AS prod_name, u.lang AS user_lang
         FROM orders o
         JOIN plans pl ON o.plan_id = pl.id
+        JOIN products p ON pl.product_id = p.id
+        LEFT JOIN users u ON o.user_id = u.user_id
         WHERE o.id = ?
         """,
       (oid,),
@@ -1496,27 +1513,28 @@ def finalize_order_approval(oid: int, key_val: str):
   row = cur.fetchone()
   if not row:
     conn.close()
-    return None, 0.0, 0.0, 0.0
+    return None, "", "", "bn"
 
   target_uid = row["user_id"]
   plid = row["plan_id"]
   paid_amt = float(row["final_amount"] or row["price"] or 0.0)
   already_approved = row["status"] == "approved"
+  prod_name = row["prod_name"] or ""
+  duration = row["duration"] or ""
+  user_lang = row["user_lang"] or "bn"
 
   cur.execute(
-      "SELECT total_spent, discount_pct FROM users WHERE user_id = ?",
+      "SELECT total_spent FROM users WHERE user_id = ?",
       (target_uid,),
   )
   urow = cur.fetchone()
   old_spent = float(urow["total_spent"] or 0.0) if urow else 0.0
-  old_vip_tier = get_vip_discount_pct(old_spent)
 
   cur.execute(
       "UPDATE orders SET delivered_key = ?, status = 'approved' WHERE id = ?",
       (key_val, oid),
   )
 
-  new_spent = old_spent
   if not already_approved:
     cur.execute(
         "UPDATE plans SET stock = CASE WHEN stock > 0 THEN stock - 1 ELSE 0"
@@ -1529,18 +1547,23 @@ def finalize_order_approval(oid: int, key_val: str):
         (new_spent, target_uid),
     )
 
-  new_vip_tier = get_vip_discount_pct(new_spent)
   conn.commit()
   conn.close()
-  return target_uid, new_spent, old_vip_tier, new_vip_tier
+  return target_uid, prod_name, duration, user_lang
 
 
-async def deliver_approved_key_message(target_uid: int, oid: int, key_val: str):
-  cred_block = format_credential_block(key_val)
+async def deliver_approved_key_message(
+    target_uid: int,
+    oid: int,
+    pname: str,
+    duration: str,
+    key_val: str,
+    lang: str = "bn",
+):
+  msg_txt = build_approved_order_message(oid, pname, duration, key_val, lang)
   await bot.send_message(
       target_uid,
-      f"✅ <b>আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!</b>\n"
-      f"{cred_block}",
+      msg_txt,
       parse_mode="HTML",
       reply_markup=update_channel_kb(),
   )
@@ -1575,7 +1598,7 @@ async def cmd_admin_key(message: Message):
     return
 
   oid = row["id"]
-  target_uid, _, _, _ = finalize_order_approval(oid, key_val)
+  target_uid, pname, duration, user_lang = finalize_order_approval(oid, key_val)
   if not target_uid:
     await message.answer("অর্ডার পাওয়া যায়নি।")
     return
@@ -1583,14 +1606,17 @@ async def cmd_admin_key(message: Message):
   if admin_states.get(ADMIN_ID, {}).get("order_id") == oid:
     admin_states.pop(ADMIN_ID, None)
 
-  # পাসওয়ার্ড দেওয়ার সময় JOIN UPDATE CHANNEL বাটন ও স্পষ্ট আলাদা বর্ডার থাকবে
+  # পাসওয়ার্ড দেওয়ার সময় ইউজারের ভাষায়, প্যানেলের নাম ও JOIN UPDATE CHANNEL বাটন থাকবে
   try:
-    await deliver_approved_key_message(target_uid, oid, key_val)
+    await deliver_approved_key_message(
+        target_uid, oid, pname, duration, key_val, user_lang
+    )
   except Exception:
     pass
 
   await message.answer(
-      f"✅ Order #{oid} APPROVED!\n🔑 Sent Key/Password:\n{key_val}"
+      f"✅ Order #{oid} APPROVED! ({user_lang.upper()})\n📦 Panel: {pname}"
+      f" ({duration})\n🔑 Sent Key/Password:\n{key_val}"
   )
 
 
@@ -2089,21 +2115,26 @@ async def handle_messages(message: Message):
           else txt
       )
       oid = state["order_id"]
-      target_uid, _, _, _ = finalize_order_approval(oid, key_val)
+      target_uid, pname, duration, user_lang = finalize_order_approval(
+          oid, key_val
+      )
       admin_states.pop(uid, None)
 
       if not target_uid:
         await message.answer("অর্ডার পাওয়া যায়নি।")
         return
 
-      # পাসওয়ার্ড দেওয়ার সময় JOIN UPDATE CHANNEL বাটন ও স্পষ্ট আলাদা বর্ডার থাকবে
+      # পাসওয়ার্ড দেওয়ার সময় ইউজারের ভাষায়, প্যানেলের নাম ও JOIN UPDATE CHANNEL বাটন থাকবে
       try:
-        await deliver_approved_key_message(target_uid, oid, key_val)
+        await deliver_approved_key_message(
+            target_uid, oid, pname, duration, key_val, user_lang
+        )
       except Exception:
         pass
 
       await message.answer(
-          f"✅ Order #{oid} APPROVED!\n🔑 Sent Key/Password:\n{key_val}"
+          f"✅ Order #{oid} APPROVED! ({user_lang.upper()})\n📦 Panel: {pname}"
+          f" ({duration})\n🔑 Sent Key/Password:\n{key_val}"
       )
       return
 
