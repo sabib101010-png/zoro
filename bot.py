@@ -16,6 +16,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    LinkPreviewOptions,
     Message,
     ReplyKeyboardMarkup,
 )
@@ -35,6 +36,8 @@ WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "01778878676")
 CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/zoro404ofc")
 DB_PATH = os.getenv("DB_PATH", "store_v9.db")
 PORT = int(os.getenv("PORT", "8080"))
+
+NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 DEFAULT_BKASH = "01862849299"
 DEFAULT_NAGAD = "01778879676"
@@ -80,7 +83,6 @@ def canon_duration(dur: str) -> str:
 
 
 def round_to_zero(amount: float) -> float:
-  """সবসময় শেষ অঙ্ক ০ (১০-এর গুণিতক)-তে রাউন্ড করে।"""
   if amount <= 0:
     return 0.0
   snapped = round(float(amount) / 10.0) * 10.0
@@ -194,7 +196,6 @@ def calc_discount_details(
   return calc_vip_price_details(pname, base_price, total_spent)
 
 
-# (product_name, category_key, [(duration, final_bot_price, stock, bonus, is_fixed_official), ...])
 RAW_CATALOG = [
     (
         "DOLPHIN PLUSH - ROOT",
@@ -311,10 +312,27 @@ def get_conn() -> sqlite3.Connection:
   return conn
 
 
+async def safe_delete_message(chat_id: int, message_id: int | None):
+  if not message_id:
+    return
+  try:
+    await bot.delete_message(chat_id=chat_id, message_id=message_id)
+  except Exception:
+    pass
+
+
+async def safe_delete_messages(chat_id: int, message_ids: list[int | None]):
+  for mid in message_ids:
+    await safe_delete_message(chat_id, mid)
+
+
 def build_approved_order_message(
     oid: int, pname: str, duration: str, key_val: str, lang: str = "bn"
 ) -> str:
-  """ইউজারের সেট করা ভাষা অনুযায়ী প্যানেলের নাম, মেয়াদ ও ইউজার/পাসওয়ার্ড সাজায়।"""
+  """
+    শুধুমাত্র ইউজারনেম ও পাসওয়ার্ডের আসল মান <code>...</code> বক্সে রাখে,
+    যাতে ট্যাপ করলে টাইটেল/লেবেল কপি না হয়ে শুধু ইউজার বা পাসওয়ার্ড কপি হয়।
+    """
   raw = (key_val or "").strip()
   safe_prod = html.escape((pname or "PANEL").upper())
   safe_dur = html.escape((duration or "").upper())
@@ -326,39 +344,71 @@ def build_approved_order_message(
       flags=re.I,
   )
   if m:
-    user_part = html.escape(m.group(1).strip())
-    pass_part = html.escape(m.group(2).strip())
-    cred_lines = f"<code>USER: {user_part}</code>\n\n<code>PASS: {pass_part}</code>"
+    user_only = html.escape(m.group(1).strip())
+    pass_only = html.escape(m.group(2).strip())
+    if lang == "en":
+      cred_section = (
+          f"👤 <b>USERNAME:</b>\n<code>{user_only}</code>\n\n"
+          f"🔐 <b>PASSWORD:</b>\n<code>{pass_only}</code>"
+      )
+    else:
+      cred_section = (
+          f"👤 <b>ইউজারনেম:</b>\n<code>{user_only}</code>\n\n"
+          f"🔐 <b>পাসওয়ার্ড:</b>\n<code>{pass_only}</code>"
+      )
   else:
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     if len(lines) >= 2:
-      cred_lines = "\n\n".join(
-          f"<code>{html.escape(ln)}</code>" for ln in lines
+      u_clean = html.escape(
+          re.sub(r"^USER\s*[:=\-]?\s*", "", lines[0], flags=re.I).strip()
       )
+      p_clean = html.escape(
+          re.sub(
+              r"^(?:PASS|PASSWORD|PW)\s*[:=\-]?\s*", "", lines[1], flags=re.I
+          ).strip()
+      )
+      if lang == "en":
+        cred_section = (
+            f"👤 <b>USERNAME:</b>\n<code>{u_clean}</code>\n\n"
+            f"🔐 <b>PASSWORD:</b>\n<code>{p_clean}</code>"
+        )
+      else:
+        cred_section = (
+            f"👤 <b>ইউজারনেম:</b>\n<code>{u_clean}</code>\n\n"
+            f"🔐 <b>পাসওয়ার্ড:</b>\n<code>{p_clean}</code>"
+        )
     else:
-      cred_lines = f"<code>{html.escape(raw)}</code>"
+      single_clean = html.escape(
+          re.sub(
+              r"^(?:USER|PASS|PASSWORD|PW|KEY)\s*[:=\-]?\s*",
+              "",
+              raw,
+              flags=re.I,
+          ).strip()
+          or raw
+      )
+      if lang == "en":
+        cred_section = f"🔑 <b>KEY / PASSWORD:</b>\n<code>{single_clean}</code>"
+      else:
+        cred_section = f"🔑 <b>কি / পাসওয়ার্ড:</b>\n<code>{single_clean}</code>"
 
   if lang == "en":
     return (
-        f"✅ <b>Your Order #{oid} is Approved!</b>\n\n"
+        f"✅ <b>Order #{oid} Approved!</b>\n"
         f"📦 <b>Panel:</b> <b>{safe_prod}{dur_part}</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🔑 <b>USER & PASSWORD FOR THIS PANEL (SEE BELOW):</b>\n\n"
-        f"{cred_lines}\n\n"
+        f"{cred_section}\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"👉 <b>The text inside the box above is your User & Password. Tap to"
-        f" copy.</b>"
+        f"👉 <i>Tap only the value box to copy.</i>"
     )
 
   return (
-      f"✅ <b>আপনার অর্ডার #{oid} এপ্রুভ হয়েছে!</b>\n\n"
+      f"✅ <b>অর্ডার #{oid} এপ্রুভ হয়েছে!</b>\n"
       f"📦 <b>প্যানেল:</b> <b>{safe_prod}{dur_part}</b>\n"
       f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-      f"🔑 <b>এই প্যানেলের ইউজার ও পাসওয়ার্ড (নিচে দেখুন):</b>\n\n"
-      f"{cred_lines}\n\n"
+      f"{cred_section}\n"
       f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-      f"👉 <b>ওপরের বক্সে দেওয়া লেখাটাই আপনার ইউজার ও পাসওয়ার্ড। চাপ দিলে কপি হয়ে"
-      f" যাবে।</b>"
+      f"👉 <i>শুধু লেখার বক্সে চাপ দিন, ইউজার বা পাসওয়ার্ড কপি হয়ে যাবে।</i>"
   )
 
 
@@ -758,24 +808,24 @@ def get_user_info(user_id: int):
   )
 
 
-def build_welcome_message(full_name: str, lang: str, total_spent: float) -> str:
-  _ = total_spent
+def build_welcome_message(full_name: str, lang: str) -> str:
   safe_name = html.escape(full_name)
+  ch_link = f'<a href="{html.escape(CHANNEL_URL)}">CLICK HERE</a>'
   if lang == "bn":
     return (
         f"👋 <b>স্বাগতম, {safe_name}!</b>\n"
         f"✨ <b>ZORO 404 OFFICIAL</b> বটে আপনাকে স্বাগতম।\n\n"
-        f"এখান থেকে খুব সহজে আপনার পছন্দের প্ল্যান বেছে নিয়ে অর্ডার করতে পারবেন।\n"
-        f"📢 আপডেট চ্যানেল: {CHANNEL_URL}\n"
-        f"💬 সাপোর্ট: <b>{SUPPORT_HANDLE}</b>\n\n"
+        f"এখান থেকে সহজে আপনার পছন্দের প্ল্যান বেছে নিয়ে অর্ডার করতে পারবেন।\n"
+        f"📢 আপডেট চ্যানেল: {ch_link}\n"
+        f"💬 সাপোর্ট: <b>{html.escape(SUPPORT_HANDLE)}</b>\n\n"
         f"🛒 শুরু করতে নিচের <b>পাসওয়ার্ড কিনুন</b> বাটনে চাপুন।"
     )
   return (
       f"👋 <b>Welcome, {safe_name}!</b>\n"
       f"✨ Welcome to <b>ZORO 404 OFFICIAL</b>.\n\n"
-      f"Choose your preferred plan and place an order easily right here.\n"
-      f"📢 Update Channel: {CHANNEL_URL}\n"
-      f"💬 Support: <b>{SUPPORT_HANDLE}</b>\n\n"
+      f"Choose your plan and place an order easily right here.\n"
+      f"📢 Update Channel: {ch_link}\n"
+      f"💬 Support: <b>{html.escape(SUPPORT_HANDLE)}</b>\n\n"
       f"🛒 Tap <b>Buy Keys</b> below to get started."
   )
 
@@ -820,7 +870,6 @@ def cancel_order_kb(oid: int, lang: str = "bn") -> InlineKeyboardMarkup:
   ]])
 
 
-# শুধু ক্যাটাগরি সিলেক্ট করার মেনু পর্যন্ত JOIN UPDATE CHANNEL বাটন থাকবে
 def category_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[
@@ -992,7 +1041,13 @@ async def setup_bot_commands():
 async def open_admin_panel(message: Message):
   if message.from_user.id != ADMIN_ID:
     return
-  admin_states.pop(ADMIN_ID, None)
+  prev = admin_states.pop(ADMIN_ID, None)
+  if prev:
+    await safe_delete_messages(
+        ADMIN_ID,
+        [prev.get("prompt_msg_id"), prev.get("list_msg_id")],
+    )
+
   conn = get_conn()
   cur = conn.cursor()
   cur.execute("SELECT COUNT(*) AS cnt FROM users")
@@ -1004,7 +1059,7 @@ async def open_admin_panel(message: Message):
   conn.close()
 
   await message.answer(
-      f"🛠 <b>ADMIN CONTROL</b> ({SUPPORT_HANDLE})\n"
+      f"🛠 <b>ADMIN CONTROL</b> ({html.escape(SUPPORT_HANDLE)})\n"
       f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"👥 <b>Total Users:</b> {u_cnt}\n"
       f"📦 <b>Total Products:</b> {p_cnt}\n"
@@ -1015,25 +1070,37 @@ async def open_admin_panel(message: Message):
 
 
 async def send_support_message(message: Message):
-  admin_states.pop(message.from_user.id, None)
-  _, _, lang, _, _, _ = get_user_info(message.from_user.id)
+  uid = message.from_user.id
+  prev_adm = admin_states.pop(uid, None)
+  if prev_adm and uid == ADMIN_ID:
+    await safe_delete_messages(
+        uid, [prev_adm.get("prompt_msg_id"), prev_adm.get("list_msg_id")]
+    )
+
+  _, _, lang, _, _, _ = get_user_info(uid)
+  ch_link = f'<a href="{html.escape(CHANNEL_URL)}">CLICK HERE</a>'
   if lang == "bn":
     msg = (
         f"📞 <b>সাপোর্ট ও যোগাযোগ</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🔹 <b>টেলিগ্রাম সাপোর্ট:</b> <b>{SUPPORT_HANDLE}</b>\n"
-        f"🔹 <b>হোয়াটসঅ্যাপ:</b> <b>{WHATSAPP_NUMBER}</b>\n"
-        f"🔹 <b>আপডেট চ্যানেল:</b> {CHANNEL_URL}"
+        f"🔹 <b>টেলিগ্রাম সাপোর্ট:</b> <b>{html.escape(SUPPORT_HANDLE)}</b>\n"
+        f"🔹 <b>হোয়াটসঅ্যাপ:</b> <b>{html.escape(WHATSAPP_NUMBER)}</b>\n"
+        f"🔹 <b>আপডেট চ্যানেল:</b> {ch_link}"
     )
   else:
     msg = (
         f"📞 <b>SUPPORT & CONTACT</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🔹 <b>Telegram Support:</b> <b>{SUPPORT_HANDLE}</b>\n"
-        f"🔹 <b>WhatsApp:</b> <b>{WHATSAPP_NUMBER}</b>\n"
-        f"🔹 <b>Update Channel:</b> {CHANNEL_URL}"
+        f"🔹 <b>Telegram Support:</b> <b>{html.escape(SUPPORT_HANDLE)}</b>\n"
+        f"🔹 <b>WhatsApp:</b> <b>{html.escape(WHATSAPP_NUMBER)}</b>\n"
+        f"🔹 <b>Update Channel:</b> {ch_link}"
     )
-  await message.answer(msg, parse_mode="HTML", reply_markup=update_channel_kb())
+  await message.answer(
+      msg,
+      parse_mode="HTML",
+      link_preview_options=NO_PREVIEW,
+      reply_markup=update_channel_kb(),
+  )
 
 
 @dp.message(Command("admin"))
@@ -1046,13 +1113,22 @@ async def cmd_admin(message: Message):
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
   uid = message.from_user.id
-  admin_states.pop(uid, None)
-  user_states.pop(uid, None)
+  prev_adm = admin_states.pop(uid, None)
+  if prev_adm:
+    await safe_delete_messages(
+        uid, [prev_adm.get("prompt_msg_id"), prev_adm.get("list_msg_id")]
+    )
+
+  prev_usr = user_states.pop(uid, None)
+  if prev_usr:
+    await safe_delete_messages(
+        uid, [prev_usr.get("order_msg_id"), prev_usr.get("submitted_msg_id")]
+    )
 
   (
       is_new,
-      lang,
-      total_spent,
+      _,
+      _,
       _,
       _,
       total_users,
@@ -1076,40 +1152,42 @@ async def cmd_start(message: Message):
     except Exception:
       pass
 
+  # /start দিলে শুধু ভাষা বেছে নেওয়ার মেসেজ যাবে; ভাষা সিলেক্ট করলে ওয়েলকাম মেসেজ যাবে
   await message.answer(
       "<b>ভাষা বেছে নিন / Choose Language:</b>",
       parse_mode="HTML",
       reply_markup=lang_kb(),
-  )
-  welcome_txt = build_welcome_message(full_name, lang, total_spent)
-  await message.answer(
-      welcome_txt, parse_mode="HTML", reply_markup=main_menu(uid, lang)
   )
 
 
 @dp.callback_query(F.data.startswith("setlang_"))
 async def cb_setlang(callback: CallbackQuery):
   lang = callback.data.split("_", 1)[1]
-  set_lang(callback.from_user.id, lang)
-  full_name, _, _, total_spent, _, _ = get_user_info(callback.from_user.id)
-  await callback.message.edit_text(
-      "<b>✅ বাংলা ভাষা সেট করা হয়েছে।</b>"
-      if lang == "bn"
-      else "<b>✅ English language set.</b>",
-      parse_mode="HTML",
-  )
-  welcome_txt = build_welcome_message(full_name, lang, total_spent)
-  await callback.message.answer(
+  uid = callback.from_user.id
+  set_lang(uid, lang)
+  full_name, _, _, _, _, _ = get_user_info(uid)
+
+  await safe_delete_message(uid, callback.message.message_id)
+
+  welcome_txt = build_welcome_message(full_name, lang)
+  await bot.send_message(
+      uid,
       welcome_txt,
       parse_mode="HTML",
-      reply_markup=main_menu(callback.from_user.id, lang),
+      link_preview_options=NO_PREVIEW,
+      reply_markup=main_menu(uid, lang),
   )
   await callback.answer()
 
 
 @dp.message(F.text.in_(["🌐 ভাষা পরিবর্তন", "🌐 Change Language"]))
 async def btn_change_lang(message: Message):
-  admin_states.pop(message.from_user.id, None)
+  uid = message.from_user.id
+  prev_adm = admin_states.pop(uid, None)
+  if prev_adm:
+    await safe_delete_messages(
+        uid, [prev_adm.get("prompt_msg_id"), prev_adm.get("list_msg_id")]
+    )
   await message.answer(
       "<b>ভাষা বেছে নিন / Choose Language:</b>",
       parse_mode="HTML",
@@ -1122,8 +1200,13 @@ async def btn_change_lang(message: Message):
     | F.text.startswith("/buy")
 )
 async def btn_buy_keys(message: Message):
-  admin_states.pop(message.from_user.id, None)
-  _, _, lang, _, _, _ = get_user_info(message.from_user.id)
+  uid = message.from_user.id
+  prev_adm = admin_states.pop(uid, None)
+  if prev_adm:
+    await safe_delete_messages(
+        uid, [prev_adm.get("prompt_msg_id"), prev_adm.get("list_msg_id")]
+    )
+  _, _, lang, _, _, _ = get_user_info(uid)
   header = (
       "🛒 <b>ক্যাটাগরি সিলেক্ট করুন:</b>"
       if lang == "bn"
@@ -1167,7 +1250,6 @@ async def cb_select_category(callback: CallbackQuery):
     )
     return
 
-  # ক্যাটাগরির ভেতরে প্রোডাক্ট লিস্টে JOIN UPDATE CHANNEL বাটন নেই
   rows = [
       [
           InlineKeyboardButton(
@@ -1263,7 +1345,6 @@ async def cb_select_product(callback: CallbackQuery):
         [InlineKeyboardButton(text=label, callback_data=f"plan_{pl['id']}")]
     )
 
-  # প্রোডাক্ট/প্ল্যান সিলেক্ট করার জায়গায় JOIN UPDATE CHANNEL বাটন নেই
   buttons.append([
       InlineKeyboardButton(
           text="⬅️ ব্যাক" if lang == "bn" else "⬅️ BACK",
@@ -1349,20 +1430,6 @@ async def cb_select_plan(callback: CallbackQuery):
   conn.commit()
   conn.close()
 
-  user_states[uid] = {
-      "step": "wait_proof",
-      "order_id": oid,
-      "plan_id": plid,
-      "pname": pname,
-      "duration": duration,
-      "base_price": base_price,
-      "discount_pct": app_pct,
-      "discount_amt": disc_amt,
-      "final_price": final_price,
-      "bonus": bonus,
-      "created_at": created,
-  }
-
   bonus_line = f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
   if lang == "bn":
     msg = (
@@ -1398,6 +1465,21 @@ async def cb_select_plan(callback: CallbackQuery):
   await callback.message.edit_text(
       msg, parse_mode="HTML", reply_markup=cancel_order_kb(oid, lang)
   )
+
+  user_states[uid] = {
+      "step": "wait_proof",
+      "order_id": oid,
+      "order_msg_id": callback.message.message_id,
+      "plan_id": plid,
+      "pname": pname,
+      "duration": duration,
+      "base_price": base_price,
+      "discount_pct": app_pct,
+      "discount_amt": disc_amt,
+      "final_price": final_price,
+      "bonus": bonus,
+      "created_at": created,
+  }
   await callback.answer()
 
 
@@ -1405,7 +1487,6 @@ async def cb_select_plan(callback: CallbackQuery):
 async def cb_user_cancel_order(callback: CallbackQuery):
   oid = int(callback.data.split("_", 1)[1])
   uid = callback.from_user.id
-  _, _, lang, _, _, _ = get_user_info(uid)
 
   conn = get_conn()
   cur = conn.cursor()
@@ -1421,12 +1502,7 @@ async def cb_user_cancel_order(callback: CallbackQuery):
   if user_states.get(uid, {}).get("order_id") == oid:
     user_states.pop(uid, None)
 
-  await callback.message.edit_text(
-      f"❌ <b>অর্ডার #{oid} বাতিল করা হয়েছে।</b>"
-      if lang == "bn"
-      else f"❌ <b>Order #{oid} cancelled.</b>",
-      parse_mode="HTML",
-  )
+  await safe_delete_message(uid, callback.message.message_id)
   await callback.answer()
 
 
@@ -1434,8 +1510,14 @@ async def cb_user_cancel_order(callback: CallbackQuery):
     F.text.in_(["📦 আমার অর্ডার", "📦 My Orders"]) | F.text.startswith("/orders")
 )
 async def btn_my_orders(message: Message):
-  admin_states.pop(message.from_user.id, None)
-  _, _, lang, _, _, _ = get_user_info(message.from_user.id)
+  uid = message.from_user.id
+  prev_adm = admin_states.pop(uid, None)
+  if prev_adm:
+    await safe_delete_messages(
+        uid, [prev_adm.get("prompt_msg_id"), prev_adm.get("list_msg_id")]
+    )
+
+  _, _, lang, _, _, _ = get_user_info(uid)
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
@@ -1449,7 +1531,7 @@ async def btn_my_orders(message: Message):
         WHERE o.user_id = ?
         ORDER BY o.id DESC LIMIT 10
         """,
-      (message.from_user.id,),
+      (uid,),
   )
   rows = cur.fetchall()
   conn.close()
@@ -1483,7 +1565,10 @@ async def btn_my_orders(message: Message):
         f" {html.escape(proof_txt)}{key_txt}"
     )
   await message.answer(
-      "\n\n".join(lines), parse_mode="HTML", reply_markup=update_channel_kb()
+      "\n\n".join(lines),
+      parse_mode="HTML",
+      link_preview_options=NO_PREVIEW,
+      reply_markup=update_channel_kb(),
   )
 
 
@@ -1565,6 +1650,7 @@ async def deliver_approved_key_message(
       target_uid,
       msg_txt,
       parse_mode="HTML",
+      link_preview_options=NO_PREVIEW,
       reply_markup=update_channel_kb(),
   )
 
@@ -1575,11 +1661,15 @@ async def cmd_admin_key(message: Message):
     return
   parts = (message.text or "").strip().split(maxsplit=1)
   if len(parts) < 2 or not parts[1].strip():
-    await message.answer("ব্যবহার: /key XXXXXXXXXXXXX")
+    await safe_delete_message(ADMIN_ID, message.message_id)
+    warn = await message.answer("ব্যবহার: /key USER: abc PASS: 123")
+    await asyncio.sleep(3)
+    await safe_delete_message(ADMIN_ID, warn.message_id)
     return
 
   key_val = parts[1].strip()
-  target_oid = admin_states.get(ADMIN_ID, {}).get("order_id")
+  prev_state = admin_states.pop(ADMIN_ID, None) or {}
+  target_oid = prev_state.get("order_id")
 
   conn = get_conn()
   cur = conn.cursor()
@@ -1594,30 +1684,29 @@ async def cmd_admin_key(message: Message):
   conn.close()
 
   if not row:
-    await message.answer("কোনো Pending অর্ডার পাওয়া যায়নি।")
+    await safe_delete_message(ADMIN_ID, message.message_id)
     return
 
   oid = row["id"]
   target_uid, pname, duration, user_lang = finalize_order_approval(oid, key_val)
   if not target_uid:
-    await message.answer("অর্ডার পাওয়া যায়নি।")
     return
 
-  if admin_states.get(ADMIN_ID, {}).get("order_id") == oid:
-    admin_states.pop(ADMIN_ID, None)
+  await safe_delete_messages(
+      ADMIN_ID,
+      [
+          message.message_id,
+          prev_state.get("prompt_msg_id"),
+          prev_state.get("alert_msg_id"),
+      ],
+  )
 
-  # পাসওয়ার্ড দেওয়ার সময় ইউজারের ভাষায়, প্যানেলের নাম ও JOIN UPDATE CHANNEL বাটন থাকবে
   try:
     await deliver_approved_key_message(
         target_uid, oid, pname, duration, key_val, user_lang
     )
   except Exception:
     pass
-
-  await message.answer(
-      f"✅ Order #{oid} APPROVED! ({user_lang.upper()})\n📦 Panel: {pname}"
-      f" ({duration})\n🔑 Sent Key/Password:\n{key_val}"
-  )
 
 
 @dp.message(Command("report"))
@@ -1711,8 +1800,12 @@ async def cb_setpay_method(callback: CallbackQuery):
     return
   method = "bkash" if callback.data == "setpay_bkash" else "nagad"
   label = "বিকাশ" if method == "bkash" else "নগদ"
-  admin_states[callback.from_user.id] = {"step": "set_pay_num", "method": method}
-  await callback.message.answer(f"নতুন {label} নম্বরটি লিখে পাঠান:")
+  prompt = await callback.message.answer(f"নতুন {label} নম্বরটি লিখে পাঠান:")
+  admin_states[callback.from_user.id] = {
+      "step": "set_pay_num",
+      "method": method,
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1720,10 +1813,13 @@ async def cb_setpay_method(callback: CallbackQuery):
 async def cb_adm_lookup(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
     return
-  admin_states[callback.from_user.id] = {"step": "user_lookup"}
-  await callback.message.answer(
+  prompt = await callback.message.answer(
       "যেকোনো ইউজারের UserID লিখে পাঠান (উদাহরণ: 5882761122):"
   )
+  admin_states[callback.from_user.id] = {
+      "step": "user_lookup",
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1764,8 +1860,11 @@ async def cb_adm_users(callback: CallbackQuery):
 async def cb_adm_broadcast(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
     return
-  admin_states[callback.from_user.id] = {"step": "broadcast"}
-  await callback.message.answer("সব ইউজারকে পাঠানোর মেসেজটি লিখুন:")
+  prompt = await callback.message.answer("সব ইউজারকে পাঠানোর মেসেজটি লিখুন:")
+  admin_states[callback.from_user.id] = {
+      "step": "broadcast",
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1773,12 +1872,15 @@ async def cb_adm_broadcast(callback: CallbackQuery):
 async def cb_adm_addprod(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
     return
-  admin_states[callback.from_user.id] = {"step": "add_prod"}
-  await callback.message.answer(
+  prompt = await callback.message.answer(
       "নতুন প্রোডাক্ট যোগ করতে লিখুন:\n"
       "ProductName | Category (ROOT / NON_ROOT / IOS / PC_LAPTOP / ALL)\n"
       "উদাহরণ: SHARK PANEL | ROOT"
   )
+  admin_states[callback.from_user.id] = {
+      "step": "add_prod",
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1799,12 +1901,14 @@ async def cb_adm_delprod(callback: CallbackQuery):
   plist = "\n".join(
       [f"ProductID {r['id']}: {r['name']} [{r['category']}]" for r in prods]
   )
-  admin_states[callback.from_user.id] = {"step": "del_prod"}
-  await callback.message.answer(
+  prompt = await callback.message.answer(
       f"প্রোডাক্ট লিস্ট:\n{plist}\n\n"
-      f"যে প্রোডাক্ট রিমুভ করতে চান তার ProductID লিখে পাঠান:\n"
-      f"উদাহরণ: 2"
+      f"যে প্রোডাক্ট রিমুভ করতে চান তার ProductID লিখে পাঠান:"
   )
+  admin_states[callback.from_user.id] = {
+      "step": "del_prod",
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1825,8 +1929,7 @@ async def cb_adm_addplan(callback: CallbackQuery):
   plist = "\n".join(
       [f"{r['id']} = {r['name']} [{r['category']}]" for r in prods]
   )
-  admin_states[callback.from_user.id] = {"step": "add_plan_loop"}
-  await callback.message.answer(
+  prompt = await callback.message.answer(
       f"প্রোডাক্ট লিস্ট:\n{plist}\n\n"
       f"প্ল্যান যোগ করতে লিখুন:\n"
       f"ProductID | Duration | SitePrice | Offer(ঐচ্ছিক)\n"
@@ -1835,6 +1938,10 @@ async def cb_adm_addplan(callback: CallbackQuery):
       f"2 | 30 Days | 700 | (1 Day Free)\n\n"
       f"বের হতে /start দিন।"
   )
+  admin_states[callback.from_user.id] = {
+      "step": "add_plan_loop",
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1862,11 +1969,14 @@ async def cb_adm_delplan(callback: CallbackQuery):
       f" (৳{float(r['price']):.0f}) {format_bonus_bracket(r['bonus'])}"
       for r in rows
   ])
-  admin_states[callback.from_user.id] = {"step": "del_plan_loop"}
-  await callback.message.answer(
+  prompt = await callback.message.answer(
       f"সব প্ল্যান লিস্ট:\n{plan_lines}\n\n"
       f"যে প্ল্যান রিমুভ করতে চান তার PlanID লিখে পাঠান (বের হতে /start দিন):"
   )
+  admin_states[callback.from_user.id] = {
+      "step": "del_plan_loop",
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1894,13 +2004,16 @@ async def cb_adm_editplan(callback: CallbackQuery):
       f" ৳{float(r['price']):.0f} | Stock: {r['stock']}"
       for r in rows
   ])
-  admin_states[callback.from_user.id] = {"step": "edit_plan"}
-  await callback.message.answer(
+  prompt = await callback.message.answer(
       f"প্ল্যান লিস্ট:\n{plan_lines}\n\n"
       f"দাম বা স্টক বদলাতে লিখুন:\n"
       f"PlanID | BrandPrice | NewStock(ঐচ্ছিক)\n"
       f"উদাহরণ: 3 | 120 | 25"
   )
+  admin_states[callback.from_user.id] = {
+      "step": "edit_plan",
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1928,13 +2041,16 @@ async def cb_adm_setoffer(callback: CallbackQuery):
       f" (৳{float(r['price']):.0f}) {format_bonus_bracket(r['bonus'])}"
       for r in rows
   ])
-  admin_states[callback.from_user.id] = {"step": "set_offer"}
-  await callback.message.answer(
+  prompt = await callback.message.answer(
       f"প্ল্যান আইডি গুলো:\n{plan_lines}\n\n"
       f"অফার সেট করতে লিখুন:\n"
       f"PlanID | Offer Text (মুছতে চাইলে PlanID | -)\n"
       f"উদাহরণ: 3 | (1 Day 1 Key Free)"
   )
+  admin_states[callback.from_user.id] = {
+      "step": "set_offer",
+      "prompt_msg_id": prompt.message_id,
+  }
   await callback.answer()
 
 
@@ -1958,8 +2074,7 @@ async def cb_adm_orders(callback: CallbackQuery):
   conn.close()
 
   if not rows:
-    await callback.message.answer("কোনো Pending অর্ডার নেই।")
-    await callback.answer()
+    await callback.answer("কোনো Pending অর্ডার নেই।", show_alert=True)
     return
 
   for r in rows:
@@ -1974,8 +2089,7 @@ async def cb_adm_orders(callback: CallbackQuery):
         f"🔑 [PASSWORD REQUEST] Order #{r['id']} | User: {r['user_id']}\n"
         f"🕒 Time: {r['created_at']}\n"
         f"📦 প্যানেল / প্রোডাক্ট: {r['name']} ({r['duration']}) -"
-        f" ৳{paid_amt:.0f}{offer_txt}{proof_line}\n\n"
-        f"লিখুন: /key XXXXXXXXXXXXX"
+        f" ৳{paid_amt:.0f}{offer_txt}{proof_line}"
     )
     if r["proof_photo_id"]:
       await callback.message.answer_photo(
@@ -1996,15 +2110,15 @@ async def cb_req_approve_with_key(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
     return
   oid = int(callback.data.split("_", 1)[1])
+  prompt = await callback.message.answer(
+      f"🔑 Order #{oid} এর ইউজার ও পাসওয়ার্ড লিখুন:"
+  )
   admin_states[callback.from_user.id] = {
       "step": "wait_approve_key",
       "order_id": oid,
+      "prompt_msg_id": prompt.message_id,
+      "alert_msg_id": callback.message.message_id,
   }
-  await callback.message.answer(
-      f"🔑 Order #{oid} এপ্রুভ করতে লিখুন:\n"
-      f"/key XXXXXXXXXXXXX\n"
-      f"(অথবা শুধু পাসওয়ার্ড/কি লিখেও পাঠাতে পারেন)"
-  )
   await callback.answer()
 
 
@@ -2031,11 +2145,8 @@ async def cb_order_reject(callback: CallbackQuery):
       pass
   conn.close()
 
-  try:
-    await callback.message.edit_text(f"❌ Order #{oid} marked as REJECTED.")
-  except Exception:
-    await callback.message.answer(f"❌ Order #{oid} marked as REJECTED.")
-  await callback.answer()
+  await safe_delete_message(ADMIN_ID, callback.message.message_id)
+  await callback.answer("Rejected")
 
 
 @dp.message()
@@ -2046,23 +2157,25 @@ async def handle_messages(message: Message):
   if uid == ADMIN_ID and uid in admin_states:
     state = admin_states[uid]
     step = state.get("step")
+    prompt_id = state.get("prompt_msg_id")
 
     if step == "set_pay_num":
       if len(txt) < 4:
-        await message.answer("সঠিক নম্বর বা স্ট্যাটাস লিখুন:")
         return
       method = state.get("method", "bkash")
       update_payment_number(method, txt)
       admin_states.pop(uid, None)
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
       label = "বিকাশ" if method == "bkash" else "নগদ"
-      await message.answer(f"✅ {label} নম্বর আপডেট হয়েছে: {txt}")
+      done = await message.answer(f"✅ {label} নম্বর আপডেট হয়েছে: {txt}")
+      await asyncio.sleep(3)
+      await safe_delete_message(uid, done.message_id)
       return
 
     elif step == "user_lookup":
       try:
         target_uid = int(txt)
       except ValueError:
-        await message.answer("সঠিক সংখ্যায় UserID লিখুন:")
         return
 
       conn = get_conn()
@@ -2075,7 +2188,6 @@ async def handle_messages(message: Message):
       urow = cur.fetchone()
       if not urow:
         conn.close()
-        await message.answer("এই UserID ডেটাবেসে পাওয়া যায়নি।")
         return
 
       cur.execute(
@@ -2092,6 +2204,7 @@ async def handle_messages(message: Message):
       pend_o = cur.fetchone()["cnt"]
       conn.close()
       admin_states.pop(uid, None)
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
 
       sp = float(urow["total_spent"] or 0.0)
       vp = get_vip_discount_pct(sp)
@@ -2107,7 +2220,6 @@ async def handle_messages(message: Message):
 
     elif step == "wait_approve_key":
       if not txt:
-        await message.answer("দয়া করে Key / Password লিখুন:")
         return
       key_val = (
           txt.split(maxsplit=1)[1].strip()
@@ -2120,27 +2232,23 @@ async def handle_messages(message: Message):
       )
       admin_states.pop(uid, None)
 
+      await safe_delete_messages(
+          uid, [message.message_id, prompt_id, state.get("alert_msg_id")]
+      )
+
       if not target_uid:
-        await message.answer("অর্ডার পাওয়া যায়নি।")
         return
 
-      # পাসওয়ার্ড দেওয়ার সময় ইউজারের ভাষায়, প্যানেলের নাম ও JOIN UPDATE CHANNEL বাটন থাকবে
       try:
         await deliver_approved_key_message(
             target_uid, oid, pname, duration, key_val, user_lang
         )
       except Exception:
         pass
-
-      await message.answer(
-          f"✅ Order #{oid} APPROVED! ({user_lang.upper()})\n📦 Panel: {pname}"
-          f" ({duration})\n🔑 Sent Key/Password:\n{key_val}"
-      )
       return
 
     elif step == "broadcast":
       if not txt:
-        await message.answer("মেসেজ খালি রাখা যাবে না।")
         return
       conn = get_conn()
       cur = conn.cursor()
@@ -2148,19 +2256,25 @@ async def handle_messages(message: Message):
       all_users = [r["user_id"] for r in cur.fetchall()]
       conn.close()
       admin_states.pop(uid, None)
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
 
       sent = 0
       for u_id in all_users:
         try:
           await bot.send_message(
-              u_id, f"📢 {txt}", reply_markup=update_channel_kb()
+              u_id,
+              f"📢 {txt}",
+              link_preview_options=NO_PREVIEW,
+              reply_markup=update_channel_kb(),
           )
           sent += 1
         except Exception:
           pass
-      await message.answer(
+      done = await message.answer(
           f"✅ Broadcast পাঠানো হয়েছে {sent}/{len(all_users)} জন ইউজারকে।"
       )
+      await asyncio.sleep(3)
+      await safe_delete_message(uid, done.message_id)
       return
 
     elif step == "add_prod":
@@ -2170,7 +2284,6 @@ async def handle_messages(message: Message):
       valid_cats = {"ROOT", "NON_ROOT", "IOS", "PC_LAPTOP", "ALL"}
       cat_val = cat_raw if cat_raw in valid_cats else "ALL"
       if not pname:
-        await message.answer("সঠিক নাম দিন।")
         return
 
       conn = get_conn()
@@ -2183,17 +2296,18 @@ async def handle_messages(message: Message):
       conn.commit()
       conn.close()
       admin_states.pop(uid, None)
-      await message.answer(
-          f"✅ প্রোডাক্ট '{pname}' (ID: {pid}) [{cat_val}] যোগ হয়েছে।\n"
-          f"এখন ⏱ Add Plan চেপে এর দিন/মেয়াদ যোগ করতে পারবেন।"
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      done = await message.answer(
+          f"✅ প্রোডাক্ট '{pname}' (ID: {pid}) [{cat_val}] যোগ হয়েছে।"
       )
+      await asyncio.sleep(3)
+      await safe_delete_message(uid, done.message_id)
       return
 
     elif step == "del_prod":
       try:
         pid = int(txt)
       except ValueError:
-        await message.answer("সঠিক ProductID সংখ্যা লিখুন:")
         return
 
       conn = get_conn()
@@ -2202,7 +2316,6 @@ async def handle_messages(message: Message):
       prow = cur.fetchone()
       if not prow:
         conn.close()
-        await message.answer("এই ProductID পাওয়া যায়নি।")
         return
 
       cur.execute("DELETE FROM plans WHERE product_id = ?", (pid,))
@@ -2210,35 +2323,27 @@ async def handle_messages(message: Message):
       conn.commit()
       conn.close()
       admin_states.pop(uid, None)
-      await message.answer(
-          f"🗑 প্রোডাক্ট '{prow['name']}' (ID: {pid}) এবং এর প্ল্যানগুলো রিমুভ"
-          f" হয়েছে।"
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      done = await message.answer(
+          f"🗑 প্রোডাক্ট '{prow['name']}' (ID: {pid}) রিমুভ হয়েছে।"
       )
+      await asyncio.sleep(3)
+      await safe_delete_message(uid, done.message_id)
       return
 
     elif step == "add_plan_loop":
       lines = [line.strip() for line in txt.splitlines() if line.strip()]
       if not lines:
-        await message.answer(
-            "ফরম্যাট ভুল! লিখুন:\n"
-            "ProductID | Duration | SitePrice | Offer(ঐচ্ছিক)"
-        )
         return
 
       conn = get_conn()
       cur = conn.cursor()
-
       added_items = []
-      failed_items = []
 
-      for idx, line in enumerate(lines, start=1):
+      for line in lines:
         parts = [x.strip() for x in line.split("|")]
         if len(parts) < 3:
-          failed_items.append(
-              f"লাইন {idx}: `{line}` -> কমপক্ষে ৩টি অংশ লাগবে"
-          )
           continue
-
         try:
           pid = int(parts[0])
           dur = canon_duration(parts[1])
@@ -2247,18 +2352,11 @@ async def handle_messages(message: Message):
           if not dur or site_price <= 0:
             raise ValueError()
         except ValueError:
-          failed_items.append(
-              f"লাইন {idx}: `{line}` -> ProductID এবং SitePrice সঠিক সংখ্যা হতে"
-              " হবে"
-          )
           continue
 
         cur.execute("SELECT name FROM products WHERE id = ?", (pid,))
         prow = cur.fetchone()
         if not prow:
-          failed_items.append(
-              f"লাইন {idx}: `{line}` -> ProductID {pid} পাওয়া যায়নি"
-          )
           continue
 
         pname = prow["name"]
@@ -2269,33 +2367,25 @@ async def handle_messages(message: Message):
             (pid, dur, brand_price, bonus),
         )
         added_items.append(
-            f"• {pname} — {dur} | সাইট ৳{site_price:.0f} → প্রাইস"
-            f" ৳{brand_price:.0f}{format_bonus_bracket(bonus)}"
+            f"• {pname} — {dur} | ৳{brand_price:.0f}{format_bonus_bracket(bonus)}"
         )
 
       conn.commit()
       conn.close()
-
-      reply_parts = []
+      await safe_delete_message(uid, message.message_id)
       if added_items:
-        reply_parts.append(
-            f"✅ মোট {len(added_items)}টি প্ল্যান যোগ হয়েছে:\n"
+        done = await message.answer(
+            f"✅ {len(added_items)}টি প্ল্যান যোগ হয়েছে:\n"
             + "\n".join(added_items)
         )
-      if failed_items:
-        reply_parts.append(
-            "⚠️ যে লাইনগুলো যোগ হয়নি:\n" + "\n".join(failed_items)
-        )
-
-      reply_parts.append("\nআরও প্ল্যান পাঠান অথবা বের হতে /start দিন:")
-      await message.answer("\n\n".join(reply_parts), parse_mode=None)
+        await asyncio.sleep(4)
+        await safe_delete_message(uid, done.message_id)
       return
 
     elif step == "del_plan_loop":
       try:
         plid = int(txt)
       except ValueError:
-        await message.answer("সঠিক PlanID সংখ্যা লিখুন (উদাহরণ: 5):")
         return
 
       conn = get_conn()
@@ -2312,31 +2402,31 @@ async def handle_messages(message: Message):
       prow = cur.fetchone()
       if not prow:
         conn.close()
-        await message.answer("এই PlanID পাওয়া যায়নি। অন্য PlanID লিখুন:")
         return
 
       cur.execute("DELETE FROM plans WHERE id = ?", (plid,))
       conn.commit()
       conn.close()
-      await message.answer(
-          f"🗑 Plan #{plid} ({prow['name']} - {prow['duration']} -"
-          f" ৳{float(prow['price']):.0f}) রিমুভ হয়েছে।\n"
-          f"আরও PlanID লিখুন অথবা বের হতে /start দিন:"
+      await safe_delete_message(uid, message.message_id)
+      done = await message.answer(
+          f"🗑 Plan #{plid} ({prow['name']} - {prow['duration']}) রিমুভ"
+          f" হয়েছে।"
       )
+      await asyncio.sleep(3)
+      await safe_delete_message(uid, done.message_id)
       return
 
     elif step == "edit_plan":
       parts = [x.strip() for x in txt.split("|")]
       if len(parts) < 2:
-        await message.answer("ফরম্যাট: PlanID | BrandPrice | NewStock(ঐচ্ছিক)")
         return
       try:
         plid = int(parts[0])
         new_stock = int(parts[2]) if len(parts) >= 3 and parts[2] else None
-        if new_stock is not None and new_stock < 0:
+        raw_p = float(parts[1])
+        if raw_p <= 0 or (new_stock is not None and new_stock < 0):
           raise ValueError()
       except ValueError:
-        await message.answer("সঠিক সংখ্যা লিখুন (যেমন: 3 | 120 | 25):")
         return
 
       conn = get_conn()
@@ -2353,16 +2443,6 @@ async def handle_messages(message: Message):
       prow = cur.fetchone()
       if not prow:
         conn.close()
-        await message.answer("এই PlanID পাওয়া যায়নি।")
-        return
-
-      try:
-        raw_p = float(parts[1])
-        if raw_p <= 0:
-          raise ValueError()
-      except ValueError:
-        conn.close()
-        await message.answer("সঠিক দাম লিখুন।")
         return
 
       new_price = (
@@ -2370,7 +2450,6 @@ async def handle_messages(message: Message):
           if is_dolphin_product(prow["name"])
           else round_to_zero(raw_p)
       )
-
       if new_stock is not None:
         cur.execute(
             "UPDATE plans SET price = ?, stock = ? WHERE id = ?",
@@ -2384,22 +2463,21 @@ async def handle_messages(message: Message):
       conn.commit()
       conn.close()
       admin_states.pop(uid, None)
-      stock_txt = f" | Stock: {new_stock}" if new_stock is not None else ""
-      await message.answer(
-          f"✅ Plan #{plid} ({prow['duration']}) আপডেট হয়েছে:"
-          f" ৳{new_price:.0f}{stock_txt}"
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      done = await message.answer(
+          f"✅ Plan #{plid} আপডেট হয়েছে: ৳{new_price:.0f}"
       )
+      await asyncio.sleep(3)
+      await safe_delete_message(uid, done.message_id)
       return
 
     elif step == "set_offer":
       if "|" not in txt:
-        await message.answer("ফরম্যাট: PlanID | Offer Text")
         return
       pl_str, offer_txt = [x.strip() for x in txt.split("|", 1)]
       try:
         plid = int(pl_str)
       except ValueError:
-        await message.answer("PlanID অবশ্যই সংখ্যা হতে হবে।")
         return
       final_offer = "" if offer_txt == "-" else offer_txt
       conn = get_conn()
@@ -2409,11 +2487,13 @@ async def handle_messages(message: Message):
       conn.commit()
       conn.close()
       admin_states.pop(uid, None)
-      await message.answer(
-          f"✅ Plan #{plid} অফার আপডেট হয়েছে: {final_offer or 'Removed'}"
-          if updated
-          else "এই PlanID পাওয়া যায়নি।"
-      )
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      if updated:
+        done = await message.answer(
+            f"✅ Plan #{plid} অফার আপডেট হয়েছে: {final_offer or 'Removed'}"
+        )
+        await asyncio.sleep(3)
+        await safe_delete_message(uid, done.message_id)
       return
 
   if uid in user_states:
@@ -2424,6 +2504,7 @@ async def handle_messages(message: Message):
     if step == "wait_proof":
       has_photo = bool(message.photo)
       valid_txt, cleaned_proof = is_valid_trx_or_proof_text(txt)
+      order_msg_id = ustate.get("order_msg_id")
 
       if not has_photo and not valid_txt:
         oid = ustate["order_id"]
@@ -2433,14 +2514,17 @@ async def handle_messages(message: Message):
         conn.commit()
         conn.close()
         user_states.pop(uid, None)
-        await message.answer(
-            f"❌ <b>অটো-রিজেক্ট!</b> অর্ডার #{oid} বাতিল করা হয়েছে।\n"
-            f"সঠিক TrxID, ১১ ডিজিটের মোবাইল নম্বর অথবা স্ক্রিনশট দিন।"
+        await safe_delete_messages(uid, [message.message_id, order_msg_id])
+        warn = await message.answer(
+            f"❌ <b>অর্ডার #{oid} বাতিল হয়েছে।</b> সঠিক TrxID, ১১ ডিজিটের"
+            f" নম্বর বা স্ক্রিনশট দিন।"
             if lang == "bn"
-            else f"❌ <b>AUTO-REJECTED!</b> Order #{oid} was cancelled.\n"
-            f"Send a valid TrxID, 11-digit mobile number, or screenshot.",
+            else f"❌ <b>Order #{oid} cancelled.</b> Send a valid TrxID,"
+            f" 11-digit number, or screenshot.",
             parse_mode="HTML",
         )
+        await asyncio.sleep(4)
+        await safe_delete_message(uid, warn.message_id)
         return
 
       if valid_txt and is_duplicate_proof(cleaned_proof):
@@ -2451,12 +2535,15 @@ async def handle_messages(message: Message):
         conn.commit()
         conn.close()
         user_states.pop(uid, None)
-        await message.answer(
-            f"❌ <b>ডুপ্লিকেট প্রুফ!</b> অর্ডার #{oid} অটো-রিজেক্ট করা হয়েছে।"
+        await safe_delete_messages(uid, [message.message_id, order_msg_id])
+        warn = await message.answer(
+            f"❌ <b>ডুপ্লিকেট প্রুফ!</b> অর্ডার #{oid} বাতিল করা হয়েছে।"
             if lang == "bn"
-            else f"❌ <b>DUPLICATE PROOF!</b> Order #{oid} was auto-rejected.",
+            else f"❌ <b>Duplicate proof!</b> Order #{oid} cancelled.",
             parse_mode="HTML",
         )
+        await asyncio.sleep(4)
+        await safe_delete_message(uid, warn.message_id)
         return
 
       oid = ustate["order_id"]
@@ -2485,12 +2572,11 @@ async def handle_messages(message: Message):
 
       user_states.pop(uid, None)
 
-      await message.answer(
-          f"✅ <b>অর্ডার #{oid} জমা হয়েছে!</b>\n"
-          f"অ্যাডমিন চেক করে <b>Key / Password</b> পাঠাবেন।"
+      await safe_delete_message(uid, order_msg_id)
+      sub_msg = await message.answer(
+          f"⏳ <b>অর্ডার #{oid}</b> — ভেরিফিকেশন চলছে..."
           if lang == "bn"
-          else f"✅ <b>ORDER #{oid} SUBMITTED!</b>\n"
-          f"Admin will verify and send your <b>Key / Password</b>.",
+          else f"⏳ <b>Order #{oid}</b> — Verifying payment...",
           parse_mode="HTML",
       )
 
@@ -2510,25 +2596,29 @@ async def handle_messages(message: Message):
           f"🕒 Time: {created}\n"
           f"👤 User: {full_name} ({username}) | ID: {uid}\n"
           f"📦 প্যানেল / প্রোডাক্ট: {pname} ({duration}) -"
-          f" ৳{final_price:.0f}{disc_line}{offer_line}{info_line}{photo_line}\n\n"
-          f"পাসওয়ার্ড দিতে লিখুন:\n"
-          f"/key XXXXXXXXXXXXX"
+          f" ৳{final_price:.0f}{disc_line}{offer_line}{info_line}{photo_line}"
       )
 
       try:
         if photo_id:
-          await bot.send_photo(
+          sent_adm = await bot.send_photo(
               ADMIN_ID,
               photo=photo_id,
               caption=admin_alert,
               reply_markup=order_approve_start_kb(oid),
           )
         else:
-          await bot.send_message(
+          sent_adm = await bot.send_message(
               ADMIN_ID,
               admin_alert,
               reply_markup=order_approve_start_kb(oid),
           )
+        admin_states[ADMIN_ID] = {
+            "step": "wait_approve_key",
+            "order_id": oid,
+            "alert_msg_id": sent_adm.message_id,
+            "user_sub_msg_id": sub_msg.message_id,
+        }
       except Exception as exc:
         logger.warning("Failed to send order alert to admin: %s", exc)
       return
