@@ -1,6 +1,8 @@
 import asyncio
 from datetime import datetime
 import html
+import io
+import json
 import logging
 import os
 import re
@@ -13,6 +15,7 @@ from aiogram.types import (
     BotCommand,
     BotCommandScopeChat,
     BotCommandScopeDefault,
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -329,6 +332,12 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
+def update_channel_kb() -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(inline_keyboard=[[
+      InlineKeyboardButton(text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL),
+  ]])
+
+
 async def safe_delete_message(chat_id: int, message_id: int | None):
   if not message_id:
     return
@@ -341,6 +350,326 @@ async def safe_delete_message(chat_id: int, message_id: int | None):
 async def safe_delete_messages(chat_id: int, message_ids: list[int | None]):
   for mid in message_ids:
     await safe_delete_message(chat_id, mid)
+
+
+# ==========================================
+# BACKUP & RESTORE ENGINE
+# ==========================================
+def export_full_backup_payload() -> dict:
+  conn = get_conn()
+  cur = conn.cursor()
+
+  cur.execute("SELECT * FROM users ORDER BY user_id")
+  users = [dict(r) for r in cur.fetchall()]
+
+  cur.execute("SELECT * FROM products ORDER BY id")
+  products = [dict(r) for r in cur.fetchall()]
+
+  cur.execute("SELECT * FROM plans ORDER BY id")
+  plans = [dict(r) for r in cur.fetchall()]
+
+  cur.execute("SELECT * FROM orders ORDER BY id")
+  orders = [dict(r) for r in cur.fetchall()]
+
+  cur.execute("SELECT * FROM payment_settings WHERE id = 1")
+  pay_row = cur.fetchone()
+  payment_settings = [dict(pay_row)] if pay_row else []
+
+  cur.execute("SELECT * FROM key_ownership ORDER BY id")
+  key_ownership = [dict(r) for r in cur.fetchall()]
+
+  conn.close()
+
+  return {
+      "version": "zoro404_backup_v2",
+      "exported_at": now_str(),
+      "counts": {
+          "users": len(users),
+          "products": len(products),
+          "plans": len(plans),
+          "orders": len(orders),
+          "key_ownership": len(key_ownership),
+      },
+      "tables": {
+          "users": users,
+          "products": products,
+          "plans": plans,
+          "orders": orders,
+          "payment_settings": payment_settings,
+          "key_ownership": key_ownership,
+      },
+  }
+
+
+def import_full_backup_payload(payload: dict) -> dict[str, int]:
+  if not isinstance(payload, dict) or not isinstance(
+      payload.get("tables"), dict
+  ):
+    raise ValueError("Invalid backup format")
+
+  tables = payload["tables"]
+  conn = get_conn()
+  cur = conn.cursor()
+
+  restored = {
+      "users": 0,
+      "products": 0,
+      "plans": 0,
+      "orders": 0,
+      "key_ownership": 0,
+  }
+
+  for p in tables.get("products", []):
+    pname = (p.get("name") or "").strip()
+    if not pname:
+      continue
+    cat = p.get("category") or "ALL"
+    if p.get("id") is not None:
+      cur.execute(
+          """
+                INSERT INTO products (id, name, category)
+                VALUES (?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    category = excluded.category
+                """,
+          (int(p["id"]), pname, cat),
+      )
+    else:
+      cur.execute(
+          "INSERT INTO products (name, category) VALUES (?, ?)",
+          (pname, cat),
+      )
+    restored["products"] += 1
+
+  for pl in tables.get("plans", []):
+    pid = pl.get("product_id")
+    dur = canon_duration(pl.get("duration") or "")
+    if not pid or not dur:
+      continue
+    cur.execute("SELECT id FROM products WHERE id = ?", (int(pid),))
+    if not cur.fetchone():
+      continue
+    price = float(pl.get("price") or 0.0)
+    stock = int(pl.get("stock") or 0)
+    bonus = pl.get("bonus") or ""
+    if pl.get("id") is not None:
+      cur.execute(
+          """
+                INSERT INTO plans (id, product_id, duration, price, stock, bonus)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    product_id = excluded.product_id,
+                    duration = excluded.duration,
+                    price = excluded.price,
+                    stock = excluded.stock,
+                    bonus = excluded.bonus
+                """,
+          (int(pl["id"]), int(pid), dur, price, stock, bonus),
+      )
+    else:
+      cur.execute(
+          """
+                INSERT INTO plans (product_id, duration, price, stock, bonus)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+          (int(pid), dur, price, stock, bonus),
+      )
+    restored["plans"] += 1
+
+  for u in tables.get("users", []):
+    if u.get("user_id") is None:
+      continue
+    uid = int(u["user_id"])
+    cur.execute(
+        """
+            INSERT INTO users (
+                user_id, full_name, username, lang, balance,
+                total_spent, discount_pct, referral_count, referred_by, joined_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                full_name = excluded.full_name,
+                username = excluded.username,
+                lang = excluded.lang,
+                balance = MAX(users.balance, excluded.balance),
+                total_spent = MAX(users.total_spent, excluded.total_spent),
+                discount_pct = MAX(users.discount_pct, excluded.discount_pct),
+                referral_count = MAX(users.referral_count, excluded.referral_count),
+                referred_by = CASE
+                    WHEN users.referred_by = 0 THEN excluded.referred_by
+                    ELSE users.referred_by
+                END,
+                joined_at = COALESCE(NULLIF(users.joined_at, ''), excluded.joined_at)
+            """,
+        (
+            uid,
+            u.get("full_name") or "User",
+            u.get("username") or "N/A",
+            u.get("lang") or "bn",
+            float(u.get("balance") or 0.0),
+            float(u.get("total_spent") or 0.0),
+            float(u.get("discount_pct") or 0.0),
+            int(u.get("referral_count") or 0),
+            int(u.get("referred_by") or 0),
+            u.get("joined_at") or now_str(),
+        ),
+    )
+    restored["users"] += 1
+
+  for o in tables.get("orders", []):
+    if o.get("user_id") is None or o.get("plan_id") is None:
+      continue
+    cur.execute("SELECT id FROM plans WHERE id = ?", (int(o["plan_id"]),))
+    if not cur.fetchone():
+      continue
+    if o.get("id") is not None:
+      cur.execute(
+          """
+                INSERT INTO orders (
+                    id, user_id, plan_id, sender_number, trx_id, proof_photo_id,
+                    delivered_key, discount_used_pct, final_amount, status, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    sender_number = COALESCE(NULLIF(excluded.sender_number, ''), orders.sender_number),
+                    trx_id = COALESCE(NULLIF(excluded.trx_id, ''), orders.trx_id),
+                    proof_photo_id = COALESCE(NULLIF(excluded.proof_photo_id, ''), orders.proof_photo_id),
+                    delivered_key = COALESCE(NULLIF(excluded.delivered_key, ''), orders.delivered_key),
+                    discount_used_pct = excluded.discount_used_pct,
+                    final_amount = excluded.final_amount,
+                    status = CASE
+                        WHEN orders.status = 'approved' THEN 'approved'
+                        ELSE excluded.status
+                    END
+                """,
+          (
+              int(o["id"]),
+              int(o["user_id"]),
+              int(o["plan_id"]),
+              o.get("sender_number") or "",
+              o.get("trx_id") or "",
+              o.get("proof_photo_id") or "",
+              o.get("delivered_key") or "",
+              float(o.get("discount_used_pct") or 0.0),
+              float(o.get("final_amount") or 0.0),
+              o.get("status") or "pending_payment",
+              o.get("created_at") or now_str(),
+          ),
+      )
+    restored["orders"] += 1
+
+  for ps in tables.get("payment_settings", []):
+    bk = ps.get("bkash") or DEFAULT_BKASH
+    ng = ps.get("nagad") or DEFAULT_NAGAD
+    cur.execute(
+        """
+            INSERT INTO payment_settings (id, bkash, nagad)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                bkash = excluded.bkash,
+                nagad = excluded.nagad
+            """,
+        (bk, ng),
+    )
+
+  for ko in tables.get("key_ownership", []):
+    kval = (ko.get("key_value") or "").strip()
+    if not kval:
+      continue
+    cur.execute(
+        """
+            INSERT INTO key_ownership (key_value, owner_user_id, product_name, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(key_value) DO UPDATE SET
+                owner_user_id = CASE
+                    WHEN key_ownership.owner_user_id = 0 THEN excluded.owner_user_id
+                    ELSE key_ownership.owner_user_id
+                END,
+                product_name = excluded.product_name
+            """,
+        (
+            kval,
+            int(ko.get("owner_user_id") or 0),
+            ko.get("product_name") or "DOLPHIN",
+            ko.get("created_at") or now_str(),
+        ),
+    )
+    restored["key_ownership"] += 1
+
+  cur.execute("""
+        UPDATE users
+        SET total_spent = MAX(
+            COALESCE(total_spent, 0.0),
+            COALESCE((
+                SELECT SUM(COALESCE(NULLIF(o.final_amount, 0), pl.price))
+                FROM orders o
+                JOIN plans pl ON o.plan_id = pl.id
+                WHERE o.user_id = users.user_id AND o.status = 'approved'
+            ), 0.0)
+        )
+        """)
+
+  conn.commit()
+  conn.close()
+  return restored
+
+
+async def send_backup_file_to_admin(chat_id: int):
+  payload = export_full_backup_payload()
+  raw_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode(
+      "utf-8"
+  )
+  stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+  filename = f"zoro404_backup_{stamp}.json"
+  counts = payload["counts"]
+
+  caption = (
+      f"💾 <b>DATABASE BACKUP READY!</b>\n"
+      f"🕒 TIME: <code>{html.escape(payload['exported_at'])}</code>\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      f"• 👥 <b>USERS:</b> <b>{counts['users']}</b>\n"
+      f"• 📦 <b>PRODUCTS:</b> <b>{counts['products']}</b>\n"
+      f"• ⏱ <b>PLANS:</b> <b>{counts['plans']}</b>\n"
+      f"• 🧾 <b>ORDERS:</b> <b>{counts['orders']}</b>\n"
+      f"• 🔐 <b>KEY LOCKS:</b> <b>{counts['key_ownership']}</b>\n\n"
+      f"<b>আপডেটের পর ডেটা ফেরাতে /restore দিয়ে এই ফাইলটি পাঠান।</b>"
+  )
+  doc = BufferedInputFile(raw_bytes, filename=filename)
+  await bot.send_document(
+      chat_id=chat_id,
+      document=doc,
+      caption=caption,
+      parse_mode="HTML",
+  )
+
+
+async def broadcast_post_restore_notice() -> tuple[int, int]:
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT user_id FROM users")
+  all_user_ids = [int(r["user_id"]) for r in cur.fetchall()]
+  conn.close()
+
+  notice_text = (
+      "<b>BOT UPDATE DONE ✅</b>\n"
+      "<b>YOU CAN BUY THE PRODUCT YOU LIKE.</b>"
+  )
+  sent = 0
+  for target_uid in all_user_ids:
+    try:
+      await bot.send_message(
+          chat_id=target_uid,
+          text=notice_text,
+          parse_mode="HTML",
+          link_preview_options=NO_PREVIEW,
+          reply_markup=update_channel_kb(),
+      )
+      sent += 1
+      await asyncio.sleep(0.03)
+    except Exception:
+      pass
+  return sent, len(all_user_ids)
 
 
 # ==========================================
@@ -993,12 +1322,15 @@ def init_db():
 
   cur.execute("""
         UPDATE users
-        SET total_spent = COALESCE((
-            SELECT SUM(COALESCE(NULLIF(o.final_amount, 0), pl.price))
-            FROM orders o
-            JOIN plans pl ON o.plan_id = pl.id
-            WHERE o.user_id = users.user_id AND o.status = 'approved'
-        ), 0.0)
+        SET total_spent = MAX(
+            COALESCE(total_spent, 0.0),
+            COALESCE((
+                SELECT SUM(COALESCE(NULLIF(o.final_amount, 0), pl.price))
+                FROM orders o
+                JOIN plans pl ON o.plan_id = pl.id
+                WHERE o.user_id = users.user_id AND o.status = 'approved'
+            ), 0.0)
+        )
         """)
 
   sync_catalog_prices(cur)
@@ -1183,12 +1515,6 @@ def status_label(status: str, lang: str) -> str:
   return (bn_map if lang == "bn" else en_map).get(status, status)
 
 
-def update_channel_kb() -> InlineKeyboardMarkup:
-  return InlineKeyboardMarkup(inline_keyboard=[[
-      InlineKeyboardButton(text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL),
-  ]])
-
-
 def cancel_order_kb(oid: int, lang: str = "bn") -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(inline_keyboard=[[
       InlineKeyboardButton(
@@ -1358,6 +1684,14 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
                   text="👥 Users & Stats", callback_data="adm_users"
               ),
           ],
+          [
+              InlineKeyboardButton(
+                  text="💾 Backup DB", callback_data="adm_backup"
+              ),
+              InlineKeyboardButton(
+                  text="♻️ Restore DB", callback_data="adm_restore"
+              ),
+          ],
       ]
   )
 
@@ -1397,6 +1731,8 @@ async def setup_bot_commands():
       BotCommand(command="key", description="অর্ডার এপ্রুভ ও Key পাঠান"),
       BotCommand(command="assign", description="কাস্টমার আইডিতে কি লক করুন"),
       BotCommand(command="report", description="সেলস রিপোর্ট দেখুন"),
+      BotCommand(command="backup", description="ব্যাকআপ ফাইল নিন"),
+      BotCommand(command="restore", description="ব্যাকআপ ফাইল রিস্টোর করুন"),
   ]
   try:
     await bot.set_my_commands(user_commands, scope=BotCommandScopeDefault())
@@ -1500,6 +1836,28 @@ async def cmd_admin(message: Message):
   if message.from_user.id != ADMIN_ID:
     return
   await open_admin_panel(message)
+
+
+@dp.message(Command("backup"))
+async def cmd_backup(message: Message):
+  if message.from_user.id != ADMIN_ID:
+    return
+  await send_backup_file_to_admin(ADMIN_ID)
+
+
+@dp.message(Command("restore"))
+async def cmd_restore(message: Message):
+  if message.from_user.id != ADMIN_ID:
+    return
+  prompt = await message.answer(
+      "♻️ <b>RESTORE DATABASE</b>\n"
+      "<b>আগে নেওয়া .json ব্যাকআপ ফাইলটি ডকুমেন্ট হিসেবে পাঠান:</b>",
+      parse_mode="HTML",
+  )
+  admin_states[ADMIN_ID] = {
+      "step": "wait_restore_file",
+      "prompt_msg_id": prompt.message_id,
+  }
 
 
 @dp.message(Command("reset"))
@@ -2299,6 +2657,30 @@ async def btn_admin_panel(message: Message):
   await open_admin_panel(message)
 
 
+@dp.callback_query(F.data == "adm_backup")
+async def cb_adm_backup(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  await callback.answer("ব্যাকআপ তৈরি হচ্ছে...")
+  await send_backup_file_to_admin(ADMIN_ID)
+
+
+@dp.callback_query(F.data == "adm_restore")
+async def cb_adm_restore(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  prompt = await callback.message.answer(
+      "♻️ <b>RESTORE DATABASE</b>\n"
+      "<b>আগে নেওয়া .json ব্যাকআপ ফাইলটি ডকুমেন্ট হিসেবে পাঠান:</b>",
+      parse_mode="HTML",
+  )
+  admin_states[ADMIN_ID] = {
+      "step": "wait_restore_file",
+      "prompt_msg_id": prompt.message_id,
+  }
+  await callback.answer()
+
+
 @dp.callback_query(F.data == "adm_report")
 async def cb_adm_report(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
@@ -2712,6 +3094,48 @@ async def handle_messages(message: Message):
     step = state.get("step")
     prompt_id = state.get("prompt_msg_id")
 
+    if step == "wait_restore_file":
+      if not message.document:
+        await message.answer(
+            "❌ অনুগ্রহ করে ব্যাকআপ <code>.json</code> ফাইলটি ডকুমেন্ট হিসেবে পাঠান।",
+            parse_mode="HTML",
+        )
+        return
+      buf = io.BytesIO()
+      try:
+        await bot.download(message.document, destination=buf)
+        raw_text = buf.getvalue().decode("utf-8")
+        data = json.loads(raw_text)
+        restored = import_full_backup_payload(data)
+        admin_states.pop(uid, None)
+        await safe_delete_messages(uid, [message.message_id, prompt_id])
+
+        status_msg = await message.answer(
+            "♻️ <b>DATABASE RESTORED! SENDING UPDATE NOTICE TO ALL USERS...</b>",
+            parse_mode="HTML",
+        )
+        sent_cnt, total_cnt = await broadcast_post_restore_notice()
+        await safe_delete_message(uid, status_msg.message_id)
+
+        await message.answer(
+            f"✅ <b>FULL RESTORE & UPDATE NOTICE COMPLETED!</b>\n"
+            f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+            f"• 👥 <b>USERS RESTORED:</b> <b>{restored['users']}</b>\n"
+            f"• 📦 <b>PRODUCTS RESTORED:</b> <b>{restored['products']}</b>\n"
+            f"• ⏱ <b>PLANS RESTORED:</b> <b>{restored['plans']}</b>\n"
+            f"• 🧾 <b>ORDERS RESTORED:</b> <b>{restored['orders']}</b>\n"
+            f"• 🔐 <b>KEY LOCKS RESTORED:</b> <b>{restored['key_ownership']}</b>\n"
+            f"• 📢 <b>UPDATE NOTICE SENT:</b> <b>{sent_cnt}/{total_cnt}</b>",
+            parse_mode="HTML",
+        )
+      except Exception as exc:
+        logger.warning("Restore failed: %s", exc)
+        await message.answer(
+            "❌ <b>ব্যাকআপ ফাইলটি সঠিকভাবে পড়া যায়নি। বৈধ ব্যাকআপ .json ফাইল দিন।</b>",
+            parse_mode="HTML",
+        )
+      return
+
     if step == "set_pay_num":
       if len(txt) < 4:
         return
@@ -2816,7 +3240,8 @@ async def handle_messages(message: Message):
         try:
           await bot.send_message(
               u_id,
-              f"📢 {txt}",
+              f"📢 <b>{html.escape(txt)}</b>",
+              parse_mode="HTML",
               link_preview_options=NO_PREVIEW,
               reply_markup=update_channel_kb(),
           )
