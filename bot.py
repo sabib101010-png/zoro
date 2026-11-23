@@ -31,38 +31,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger("zoro404_bot")
 
-BOT_TOKEN = os.getenv(
-    "BOT_TOKEN", "9211572979:AAEI73Lq3e1FbtcmiYpQSmYlYjzMMh3QKvg"
-)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "8524854849"))
-SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@ZORO_BROTHER")
-WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "01778878676")
-CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/zoro404ofc")
-DB_PATH = os.getenv("DB_PATH", "store_v9.db")
+SUPPORT_HANDLE = os.getenv("SUPPORT_HANDLE", "@ZORO_BROTHER").strip()
+WHATSAPP_NUMBER = os.getenv("WHATSAPP_NUMBER", "01778878676").strip()
+CHANNEL_URL = os.getenv("CHANNEL_URL", "https://t.me/zoro404ofc").strip()
+PAYMENT_PROOF_CHANNEL_URL = (
+    os.getenv("PAYMENT_PROOF_CHANNEL_URL", CHANNEL_URL).strip() or CHANNEL_URL
+)
+DB_PATH = os.getenv("DB_PATH", "store_v9.db").strip()
 PORT = int(os.getenv("PORT", "8080"))
 
 # Dolphin Reseller API Config
-DOLPHIN_BASE_URL = os.getenv(
-    "DOLPHIN_BASE_URL", "https://dolphinbot.catchmeifyoucan.org"
-).rstrip("/")
-DOLPHIN_RESELLER_KEY = os.getenv(
-    "DOLPHIN_RESELLER_KEY", "dres_c7c78682ab970b56ee9821f4a991495979765395"
+DOLPHIN_BASE_URL = (
+    os.getenv("DOLPHIN_BASE_URL", "https://dolphinbot.catchmeifyoucan.org")
+    .strip()
+    .rstrip("/")
 )
-DOLPHIN_USER_AGENT = os.getenv("DOLPHIN_USER_AGENT", "paymentdolphin0234432")
+DOLPHIN_RESELLER_KEY = os.getenv("DOLPHIN_RESELLER_KEY", "").strip()
+DOLPHIN_USER_AGENT = os.getenv(
+    "DOLPHIN_USER_AGENT", "paymentdolphin0234432"
+).strip()
 
 NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 DEFAULT_BKASH = "01862849299"
 DEFAULT_NAGAD = "01778879676"
-
-# Saved future payment plan (Rocket & Upay disabled for now; Binance always in English)
-FUTURE_PAYMENT_PLAN = [
-    {"code": "bkash", "icon": "🅱️", "label_bn": "বিকাশ", "enabled": True},
-    {"code": "nagad", "icon": "🅽", "label_bn": "নগদ", "enabled": True},
-    {"code": "rocket", "icon": "🚀", "label_bn": "রকেট", "enabled": False},
-    {"code": "upay", "icon": "🟣", "label_bn": "উপায়", "enabled": False},
-    {"code": "binance", "icon": "🟡", "label_en": "Binance", "enabled": False},
-]
 
 CATALOG_PRODUCTS = []
 
@@ -85,7 +79,7 @@ def get_conn() -> sqlite3.Connection:
   return conn
 
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(token=BOT_TOKEN) if BOT_TOKEN else None
 dp = Dispatcher()
 
 
@@ -96,7 +90,7 @@ def update_channel_kb() -> InlineKeyboardMarkup:
 
 
 async def safe_delete_message(chat_id: int, message_id: int | None):
-  if not message_id:
+  if not message_id or not bot:
     return
   try:
     await bot.delete_message(chat_id=chat_id, message_id=message_id)
@@ -309,57 +303,53 @@ def update_payment_number(method: str, number: str):
   conn.close()
 
 
-def detect_payment_method_label(
+def build_wallet_verification_message(
     sender_number: str = "",
     trx_id: str = "",
     proof_photo_id: str = "",
-    selected_channel: str = "",
 ) -> str:
-  ch = (selected_channel or "").strip().lower()
-  num = normalize_bd_mobile(sender_number or "") or (sender_number or "").strip()
-  trx = (trx_id or "").strip().upper()
-  has_photo = bool((proof_photo_id or "").strip())
-
   bkash_num, nagad_num = get_payment_numbers()
   norm_bk = normalize_bd_mobile(bkash_num) or bkash_num
   norm_ng = normalize_bd_mobile(nagad_num) or nagad_num
 
-  if ch == "bkash":
-    if num:
-      return f"🅱️ বিকাশে টাকা পাঠানো হয়েছে ({num})"
-    if trx:
-      return f"🅱️ বিকাশে টাকা পাঠানো হয়েছে (TrxID: {trx})"
-    if has_photo:
-      return "🅱️ বিকাশে টাকা পাঠানো হয়েছে (স্ক্রিনশট)"
-    return "🅱️ বিকাশে টাকা পাঠানো হয়েছে"
-
-  if ch == "nagad":
-    if num:
-      return f"🅽 নগদে টাকা পাঠানো হয়েছে ({num})"
-    if trx:
-      return f"🅽 নগদে টাকা পাঠানো হয়েছে (TrxID: {trx})"
-    if has_photo:
-      return "🅽 নগদে টাকা পাঠানো হয়েছে (স্ক্রিনশট)"
-    return "🅽 নগদে টাকা পাঠানো হয়েছে"
+  num = normalize_bd_mobile(sender_number or "") or (sender_number or "").strip()
+  trx = (trx_id or "").strip().upper()
+  has_photo = bool((proof_photo_id or "").strip())
 
   if num and norm_bk and num == norm_bk:
-    return f"🅱️ বিকাশে টাকা পাঠানো হয়েছে ({num})"
+    return f"এটা বিকাশ: {norm_bk}"
   if num and norm_ng and num == norm_ng:
-    return f"🅽 নগদে টাকা পাঠানো হয়েছে ({num})"
+    return f"এটা নগদ: {norm_ng}"
 
   if trx:
     if trx.startswith("BK") or "BKASH" in trx:
-      return f"🅱️ বিকাশে টাকা পাঠানো হয়েছে (TrxID: {trx})"
+      return f"এটা বিকাশ: {norm_bk}"
     if trx.startswith("NG") or "NAGAD" in trx:
-      return f"🅽 নগদে টাকা পাঠানো হয়েছে (TrxID: {trx})"
-    return f"TrxID ({trx})"
+      return f"এটা নগদ: {norm_ng}"
+    return f"TrxID: {trx} (এটা বিকাশ: {norm_bk} / এটা নগদ: {norm_ng} যাচাই করুন)"
 
   if num:
-    return f"মোবাইল নম্বর ({num})"
+    return f"নম্বর: {num} (এটা বিকাশ: {norm_bk} / এটা নগদ: {norm_ng} যাচাই করুন)"
 
   if has_photo:
-    return "স্ক্রিনশট (বিকাশ / নগদ)"
-  return "উল্লেখ নেই"
+    return f"স্ক্রিনশট (এটা বিকাশ: {norm_bk} / এটা নগদ: {norm_ng} যাচাই করুন)"
+
+  return f"এটা বিকাশ: {norm_bk} | এটা নগদ: {norm_ng}"
+
+
+def build_bd_payment_block(amount: float) -> str:
+  bkash_num, nagad_num = get_payment_numbers()
+  proof_link = f'<a href="{html.escape(PAYMENT_PROOF_CHANNEL_URL)}">Click Here👈</a>'
+  return (
+      f"🇧🇩<b>𝗕𝗗 𝗣𝗔𝗬𝗠𝗘𝗡𝗧 𝗠𝗘𝗧𝗛𝗢𝗗</b> 💰\n"
+      f"💵 <b>Amount:</b> <b>৳{amount:.0f}</b>\n\n"
+      f"👉 <b>𝗕𝗞𝗮𝘀𝗵 :</b> <code>{html.escape(bkash_num)}</code> 👈\n"
+      f"👉 <b>𝗡𝗮𝗴𝗮𝗱 :</b> <code>{html.escape(nagad_num)}</code>👈\n\n"
+      f"✅<b>PAYMENT PROOF CHANNEL</b>\n"
+      f"{proof_link}\n\n"
+      f"Send money allow⚠️\n"
+      f"Send Screenshot After Payment ⚠️"
+  )
 
 
 # ==========================================
@@ -389,7 +379,7 @@ def export_full_backup_payload() -> dict:
     key_ownership = [dict(r) for r in cur.fetchall()]
 
     return {
-        "version": "zoro404_backup_v5_fixed",
+        "version": "zoro404_backup_v6_simple",
         "exported_at": now_str(),
         "counts": {
             "users": len(users),
@@ -680,6 +670,8 @@ def import_full_backup_payload(payload: dict) -> dict[str, int]:
 async def send_backup_file_to_admin(
     chat_id: int, title_prefix: str = "DATABASE BACKUP READY!"
 ):
+  if not bot:
+    return
   payload = export_full_backup_payload()
   raw_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode(
       "utf-8"
@@ -898,6 +890,14 @@ async def dolphin_reset_hwid_api(
         else "❌ Password is incorrect or not found. Try again with a valid password.",
     )
 
+  if not DOLPHIN_RESELLER_KEY:
+    return (
+        False,
+        "❌ রিসেট API কনফিগার করা নেই।"
+        if lang == "bn"
+        else "❌ Reset API is not configured.",
+    )
+
   endpoints = [
       f"{DOLPHIN_BASE_URL}/api/v1/reseller/reset-hwid",
       f"{DOLPHIN_BASE_URL}/api/reseller/reset-hwid",
@@ -958,6 +958,9 @@ async def dolphin_claim_key_api(
     key_val: str, customer_chat_id: int
 ) -> tuple[bool, str]:
   clean_key = clean_reset_key_value(key_val)
+  if not DOLPHIN_RESELLER_KEY:
+    return False, "রিসেট API কনফিগার করা নেই।"
+
   url = f"{DOLPHIN_BASE_URL}/api/v1/reseller/claim-key"
   payload = {
       "key": clean_key,
@@ -1467,40 +1470,6 @@ def status_label(status: str, lang: str) -> str:
   return (bn_map if lang == "bn" else en_map).get(status, status)
 
 
-def payment_method_pick_kb(oid: int) -> InlineKeyboardMarkup:
-  return InlineKeyboardMarkup(
-      inline_keyboard=[
-          [
-              InlineKeyboardButton(
-                  text="🅱️ বিকাশ", callback_data=f"paych_{oid}_bkash"
-              ),
-              InlineKeyboardButton(
-                  text="🅽 নগদ", callback_data=f"paych_{oid}_nagad"
-              ),
-          ],
-          [
-              InlineKeyboardButton(
-                  text="🚀 রকেট (বন্ধ)", callback_data="paych_disabled_rocket"
-              ),
-              InlineKeyboardButton(
-                  text="🟣 উপায় (বন্ধ)", callback_data="paych_disabled_upay"
-              ),
-          ],
-          [
-              InlineKeyboardButton(
-                  text="🟡 Binance (Closed)",
-                  callback_data="paych_disabled_binance",
-              ),
-          ],
-          [
-              InlineKeyboardButton(
-                  text="❌ অর্ডার বাতিল করুন", callback_data=f"cancelord_{oid}"
-              ),
-          ],
-      ]
-  )
-
-
 def cancel_order_kb(oid: int, lang: str = "bn") -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(inline_keyboard=[[
       InlineKeyboardButton(
@@ -1755,10 +1724,10 @@ def payment_numbers_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[[
           InlineKeyboardButton(
-              text="🅱️ Set বিকাশ", callback_data="setpay_bkash"
+              text="📱 Set bKash", callback_data="setpay_bkash"
           ),
           InlineKeyboardButton(
-              text="🅽 Set নগদ", callback_data="setpay_nagad"
+              text="📱 Set Nagad", callback_data="setpay_nagad"
           ),
       ]]
   )
@@ -1774,6 +1743,8 @@ def order_approve_start_kb(oid: int) -> InlineKeyboardMarkup:
 
 
 async def setup_bot_commands():
+  if not bot:
+    return
   user_commands = [
       BotCommand(command="start", description="বট শুরু / মেনু খুলুন"),
       BotCommand(command="buy", description="পাসওয়ার্ড / কি কিনুন"),
@@ -1822,6 +1793,8 @@ async def open_reset_menu(message: Message):
 
 
 async def send_admin_panel_to_chat(chat_id: int):
+  if not bot:
+    return
   prev = admin_states.pop(ADMIN_ID, None)
   if prev:
     await safe_delete_messages(
@@ -2052,7 +2025,7 @@ async def cmd_start(message: Message):
       _,
   ) = register_or_update_user(message, referrer_id=0)
 
-  if is_new and message.from_user.id != ADMIN_ID:
+  if is_new and message.from_user.id != ADMIN_ID and bot:
     new_user_alert = (
         f"🎉 New User Joined!\n\n"
         f"👤 Name: {full_name}\n"
@@ -2083,13 +2056,14 @@ async def cb_setlang(callback: CallbackQuery):
   await safe_delete_message(uid, callback.message.message_id)
 
   welcome_txt = build_welcome_message(full_name, lang)
-  await bot.send_message(
-      uid,
-      welcome_txt,
-      parse_mode="HTML",
-      link_preview_options=NO_PREVIEW,
-      reply_markup=main_menu(uid, lang),
-  )
+  if bot:
+    await bot.send_message(
+        uid,
+        welcome_txt,
+        parse_mode="HTML",
+        link_preview_options=NO_PREVIEW,
+        reply_markup=main_menu(uid, lang),
+    )
   await callback.answer()
 
 
@@ -2403,26 +2377,25 @@ async def cb_select_plan(callback: CallbackQuery):
   conn.close()
 
   bonus_line = f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
+  pay_block = build_bd_payment_block(final_price)
+
   msg = (
       f"🛒 <b>অর্ডার #{oid}</b>\n"
-      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"📦 <b>প্রোডাক্ট:</b> {html.escape(pname)}\n"
       f"⏱ <b>সময় / মেয়াদ:</b> {html.escape(duration)}{bonus_line}\n"
-      f"💵 <b>মোট টাকা:</b> <b>৳{final_price:.0f}</b>\n\n"
-      f"💳 <b>পেমেন্ট মাধ্যম বেছে নিন:</b>\n"
-      f"• 🅱️ <b>বিকাশ</b> (খোলা)\n"
-      f"• 🅽 <b>নগদ</b> (খোলা)\n"
-      f"• 🚀 রকেট — <i>আপাতত বন্ধ</i>\n"
-      f"• 🟣 উপায় — <i>আপাতত বন্ধ</i>\n"
-      f"• 🟡 Binance — <i>Currently closed</i>"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      f"{pay_block}"
   )
 
   await callback.message.edit_text(
-      msg, parse_mode="HTML", reply_markup=payment_method_pick_kb(oid)
+      msg,
+      parse_mode="HTML",
+      link_preview_options=NO_PREVIEW,
+      reply_markup=cancel_order_kb(oid, lang),
   )
 
   user_states[uid] = {
-      "step": "wait_payment_channel",
+      "step": "wait_proof",
       "order_id": oid,
       "order_msg_id": callback.message.message_id,
       "plan_id": plid,
@@ -2434,86 +2407,6 @@ async def cb_select_plan(callback: CallbackQuery):
       "final_price": final_price,
       "bonus": bonus,
       "created_at": created,
-  }
-  await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("paych_disabled_"))
-async def cb_paych_disabled(callback: CallbackQuery):
-  ch_code = callback.data.split("_", 2)[2]
-  if ch_code == "binance":
-    await callback.answer(
-        "Binance is currently closed. Please select বিকাশ or নগদ.",
-        show_alert=True,
-    )
-  elif ch_code == "rocket":
-    await callback.answer(
-        "রকেট পেমেন্ট আপাতত বন্ধ আছে। বিকাশ বা নগদ সিলেক্ট করুন।",
-        show_alert=True,
-    )
-  else:
-    await callback.answer(
-        "উপায় পেমেন্ট আপাতত বন্ধ আছে। বিকাশ বা নগদ সিলেক্ট করুন।",
-        show_alert=True,
-    )
-
-
-@dp.callback_query(F.data.startswith("paych_"))
-async def cb_select_payment_channel(callback: CallbackQuery):
-  parts = callback.data.split("_", 2)
-  if len(parts) < 3:
-    await callback.answer()
-    return
-  oid = int(parts[1])
-  ch = parts[2]
-  if ch not in ("bkash", "nagad"):
-    await callback.answer()
-    return
-
-  uid = callback.from_user.id
-  _, _, lang, _, _, _ = get_user_info(uid)
-  bkash_num, nagad_num = get_payment_numbers()
-
-  ustate = user_states.get(uid) or {}
-  pname = ustate.get("pname") or "PANEL"
-  duration = ustate.get("duration") or ""
-  final_price = float(ustate.get("final_price") or 0.0)
-  bonus = ustate.get("bonus") or ""
-
-  if ch == "bkash":
-    ch_badge = "🅱️ <b>বিকাশ</b>"
-    target_num = bkash_num
-    send_note = "বিকাশে Send Money করুন"
-  else:
-    ch_badge = "🅽 <b>নগদ</b>"
-    target_num = nagad_num
-    send_note = "নগদে Send Money করুন"
-
-  bonus_line = f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
-  msg = (
-      f"🛒 <b>অর্ডার #{oid}</b> — {ch_badge}\n"
-      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-      f"📦 <b>প্রোডাক্ট:</b> {html.escape(pname)}\n"
-      f"⏱ <b>সময় / মেয়াদ:</b> {html.escape(duration)}{bonus_line}\n"
-      f"💵 <b>মোট টাকা:</b> <b>৳{final_price:.0f}</b> ({send_note})\n\n"
-      f"📲 {ch_badge} <b>নম্বর (ক্লিক করে কপি করুন):</b>\n"
-      f"<code>{html.escape(target_num)}</code>\n\n"
-      f"টাকা পাঠানোর পর যেকোনো ১টি দিন:\n"
-      f"📸 <b>পেমেন্টের স্ক্রিনশট</b>\n"
-      f"অথবা\n"
-      f"✍️ <b>সঠিক TrxID / ১১ ডিজিটের মোবাইল নম্বর</b>"
-  )
-
-  await callback.message.edit_text(
-      msg, parse_mode="HTML", reply_markup=cancel_order_kb(oid, lang)
-  )
-
-  user_states[uid] = {
-      **ustate,
-      "step": "wait_proof",
-      "order_id": oid,
-      "order_msg_id": callback.message.message_id,
-      "payment_channel": ch,
   }
   await callback.answer()
 
@@ -2685,6 +2578,8 @@ async def deliver_approved_key_message(
     key_val: str,
     lang: str = "bn",
 ):
+  if not bot:
+    return
   msg_txt = build_approved_order_message(oid, pname, duration, key_val, lang)
   await bot.send_message(
       target_uid,
@@ -2863,8 +2758,8 @@ async def cb_adm_paynums(callback: CallbackQuery):
   bkash_num, nagad_num = get_payment_numbers()
   await callback.message.answer(
       f"💳 <b>বর্তমান পেমেন্ট নম্বর:</b>\n"
-      f"• 🅱️ <b>বিকাশ:</b> <code>{html.escape(bkash_num)}</code>\n"
-      f"• 🅽 <b>নগদ:</b> <code>{html.escape(nagad_num)}</code>\n\n"
+      f"• <b>এটা বিকাশ:</b> <code>{html.escape(bkash_num)}</code>\n"
+      f"• <b>এটা নগদ:</b> <code>{html.escape(nagad_num)}</code>\n\n"
       f"যে নম্বরটি বদলাতে চান নিচের বাটনে চাপুন:",
       parse_mode="HTML",
       reply_markup=payment_numbers_kb(),
@@ -3419,7 +3314,7 @@ async def cb_adm_orders(callback: CallbackQuery):
         f"\n🧾 Info: {proof_val}" if proof_val else "\n📸 Proof: Screenshot"
     )
     paid_amt = float(r["final_amount"] or r["price"] or 0.0)
-    pay_method = detect_payment_method_label(
+    pay_msg = build_wallet_verification_message(
         r["sender_number"], r["trx_id"], r["proof_photo_id"]
     )
 
@@ -3429,7 +3324,7 @@ async def cb_adm_orders(callback: CallbackQuery):
         f"👤 <b>User ID:</b> <code>{r['user_id']}</code>\n"
         f"📦 <b>Panel:</b> <b>{html.escape(r['name'])}</b> ({html.escape(r['duration'])})\n"
         f"💰 <b>Amount:</b> <b>৳{paid_amt:.0f}</b>\n"
-        f"💳 <b>Method:</b> {html.escape(pay_method)}\n"
+        f"💳 <b>Wallet:</b> {html.escape(pay_msg)}\n"
         f"🕒 <b>Time:</b> <code>{html.escape(r['created_at'])}</code>"
         f"{offer_txt}{proof_line}"
     )
@@ -3482,13 +3377,14 @@ async def cb_order_reject(callback: CallbackQuery):
     uid = row["user_id"]
     cur.execute("UPDATE orders SET status = 'rejected' WHERE id = ?", (oid,))
     conn.commit()
-    try:
-      await bot.send_message(
-          uid,
-          f"❌ আপনার অর্ডার #{oid} রিজেক্ট করা হয়েছে।",
-      )
-    except Exception:
-      pass
+    if bot:
+      try:
+        await bot.send_message(
+            uid,
+            f"❌ আপনার অর্ডার #{oid} রিজেক্ট করা হয়েছে।",
+        )
+      except Exception:
+        pass
   conn.close()
 
   await safe_delete_message(ADMIN_ID, callback.message.message_id)
@@ -3511,6 +3407,8 @@ async def handle_messages(message: Message):
             "❌ অনুগ্রহ করে ব্যাকআপ <code>.json</code> ফাইলটি ডকুমেন্ট হিসেবে পাঠান।",
             parse_mode="HTML",
         )
+        return
+      if not bot:
         return
       buf = io.BytesIO()
       try:
@@ -3821,7 +3719,7 @@ async def handle_messages(message: Message):
       order_cards = []
       for o in all_ords[:10]:
         amt = float(o["final_amount"] or o["price"] or 0.0)
-        method_lbl = detect_payment_method_label(
+        wallet_msg = build_wallet_verification_message(
             o["sender_number"], o["trx_id"], o["proof_photo_id"]
         )
         st_bn = status_label(o["status"], "bn")
@@ -3834,7 +3732,7 @@ async def handle_messages(message: Message):
             f"  • <b>#{o['id']}</b> | <b>{html.escape(o['pname'])}</b>"
             f" ({html.escape(o['duration'])}) — <b>৳{amt:.0f}</b>"
             f" [<b>{html.escape(st_bn)}</b>]\n"
-            f"     💳 <b>মাধ্যম:</b> {html.escape(method_lbl)}\n"
+            f"     💳 {html.escape(wallet_msg)}\n"
             f"     🕒 <b>সময়:</b> <code>{html.escape(o['created_at'])}</code>{key_line}"
         )
 
@@ -3893,7 +3791,7 @@ async def handle_messages(message: Message):
       return
 
     elif step == "broadcast":
-      if not txt:
+      if not txt or not bot:
         return
       conn = get_conn()
       cur = conn.cursor()
@@ -3964,16 +3862,6 @@ async def handle_messages(message: Message):
       )
       return
 
-    if step == "wait_payment_channel":
-      oid = ustate.get("order_id")
-      if oid:
-        await message.answer(
-            "👆 <b>আগে নিচের বাটন থেকে বিকাশ বা নগদ সিলেক্ট করুন।</b>",
-            parse_mode="HTML",
-            reply_markup=payment_method_pick_kb(int(oid)),
-        )
-      return
-
     if step == "wait_proof":
       has_photo = bool(message.photo)
       valid_txt, cleaned_proof, is_mobile = is_valid_trx_or_proof_text(txt)
@@ -4026,7 +3914,6 @@ async def handle_messages(message: Message):
       disc_pct = float(ustate.get("discount_pct", 0.0))
       bonus = ustate.get("bonus", "")
       created = ustate.get("created_at", now_str())
-      selected_ch = ustate.get("payment_channel", "")
 
       photo_id = message.photo[-1].file_id if has_photo else ""
       sender_num_val = cleaned_proof if (valid_txt and is_mobile) else ""
@@ -4056,8 +3943,8 @@ async def handle_messages(message: Message):
       )
 
       full_name, username, _, total_spent, _, _ = get_user_info(uid)
-      pay_method_lbl = detect_payment_method_label(
-          sender_num_val, trx_val, photo_id, selected_channel=selected_ch
+      wallet_msg = build_wallet_verification_message(
+          sender_num_val, trx_val, photo_id
       )
       offer_line = (
           f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
@@ -4087,35 +3974,36 @@ async def handle_messages(message: Message):
           f"📦 <b>প্যানেল:</b> <b>{html.escape(pname)}</b>"
           f" (<code>{html.escape(duration)}</code>)\n"
           f"💵 <b>টাকার পরিমাণ:</b> <b>৳{final_price:.0f}</b>\n"
-          f"💳 <b>পেমেন্ট মাধ্যম:</b> <b>{html.escape(pay_method_lbl)}</b>\n"
+          f"💳 <b>যাচাই:</b> <b>{html.escape(wallet_msg)}</b>\n"
           f"🕒 <b>সময়:</b> <code>{html.escape(created)}</code>"
           f"{disc_line}{offer_line}{info_line}{photo_line}"
       )
 
-      try:
-        if photo_id:
-          sent_adm = await bot.send_photo(
-              ADMIN_ID,
-              photo=photo_id,
-              caption=admin_alert,
-              parse_mode="HTML",
-              reply_markup=order_approve_start_kb(oid),
-          )
-        else:
-          sent_adm = await bot.send_message(
-              ADMIN_ID,
-              admin_alert,
-              parse_mode="HTML",
-              reply_markup=order_approve_start_kb(oid),
-          )
-        admin_states[ADMIN_ID] = {
-            "step": "wait_approve_key",
-            "order_id": oid,
-            "alert_msg_id": sent_adm.message_id,
-            "user_sub_msg_id": sub_msg.message_id,
-        }
-      except Exception as exc:
-        logger.warning("Failed to send order alert to admin: %s", exc)
+      if bot:
+        try:
+          if photo_id:
+            sent_adm = await bot.send_photo(
+                ADMIN_ID,
+                photo=photo_id,
+                caption=admin_alert,
+                parse_mode="HTML",
+                reply_markup=order_approve_start_kb(oid),
+            )
+          else:
+            sent_adm = await bot.send_message(
+                ADMIN_ID,
+                admin_alert,
+                parse_mode="HTML",
+                reply_markup=order_approve_start_kb(oid),
+            )
+          admin_states[ADMIN_ID] = {
+              "step": "wait_approve_key",
+              "order_id": oid,
+              "alert_msg_id": sent_adm.message_id,
+              "user_sub_msg_id": sub_msg.message_id,
+          }
+        except Exception as exc:
+          logger.warning("Failed to send order alert to admin: %s", exc)
       return
 
 
@@ -4142,8 +4030,17 @@ async def start_health_server():
 async def main():
   init_db()
   await start_health_server()
+  logger.info("Health server running on port %s...", PORT)
+  if not bot or not BOT_TOKEN:
+    logger.warning(
+        "BOT_TOKEN is not set. Set BOT_TOKEN in environment variables to start"
+        " Telegram polling."
+    )
+    while True:
+      await asyncio.sleep(3600)
+
   await setup_bot_commands()
-  logger.info("Bot is running on port %s...", PORT)
+  logger.info("Bot polling started...")
   await dp.start_polling(bot)
 
 
