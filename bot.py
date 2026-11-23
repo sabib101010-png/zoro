@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sqlite3
+import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandStart
@@ -314,6 +315,9 @@ def now_str() -> str:
 
 
 def get_conn() -> sqlite3.Connection:
+  db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+  if db_dir and not os.path.exists(db_dir):
+    os.makedirs(db_dir, exist_ok=True)
   conn = sqlite3.connect(DB_PATH, timeout=30.0)
   conn.row_factory = sqlite3.Row
   conn.execute("PRAGMA journal_mode=WAL;")
@@ -342,6 +346,28 @@ async def safe_delete_messages(chat_id: int, message_ids: list[int | None]):
 # ==========================================
 # DOLPHIN OWNERSHIP LOCK & API CLIENT
 # ==========================================
+def clean_reset_key_value(raw_text: str) -> str:
+  cleaned = (raw_text or "").strip()
+  if not cleaned:
+    return ""
+  m = re.search(
+      r"(?:PASS|PASSWORD|PW)\s*[:=\-]?\s*(.+)$",
+      cleaned,
+      flags=re.I,
+  )
+  if m:
+    val = m.group(1).strip()
+    if val:
+      return val
+  val_after_prefix = re.sub(
+      r"^(?:USER|PASS|PASSWORD|PW|KEY)\s*[:=\-]?\s*",
+      "",
+      cleaned,
+      flags=re.I,
+  ).strip()
+  return val_after_prefix or cleaned
+
+
 def extract_key_tokens(raw_text: str) -> list[str]:
   cleaned = (raw_text or "").strip()
   if not cleaned:
@@ -404,7 +430,7 @@ def assign_key_ownership(
 def verify_key_ownership(
     submitted_key: str, requester_user_id: int, lang: str = "bn"
 ) -> tuple[bool, str]:
-  clean_k = (submitted_key or "").strip()
+  clean_k = clean_reset_key_value(submitted_key)
   if not clean_k:
     return (
         False,
@@ -448,54 +474,110 @@ def get_dolphin_headers() -> dict[str, str]:
   return {
       "User-Agent": DOLPHIN_USER_AGENT,
       "X-Reseller-Key": DOLPHIN_RESELLER_KEY,
+      "Authorization": f"Bearer {DOLPHIN_RESELLER_KEY}",
       "Content-Type": "application/json",
+      "Accept": "application/json",
   }
+
+
+def _is_reset_success_response(status: int, data: dict | list | str) -> bool:
+  if not (200 <= status < 300):
+    return False
+  if isinstance(data, dict):
+    for k in ("success", "ok", "status"):
+      if k in data:
+        val = data[k]
+        if isinstance(val, bool):
+          return val
+        if isinstance(val, str):
+          low = val.strip().lower()
+          if low in ("false", "error", "failed", "fail", "invalid", "not_found"):
+            return False
+          if low in ("true", "ok", "success", "reset"):
+            return True
+    err_msg = str(data.get("error") or data.get("message") or "").lower()
+    if any(
+        w in err_msg
+        for w in (
+            "invalid",
+            "not found",
+            "wrong",
+            "incorrect",
+            "fail",
+            "error",
+            "expired",
+        )
+    ):
+      return False
+    return True
+  if isinstance(data, str):
+    low = data.strip().lower()
+    if any(
+        w in low
+        for w in ("invalid", "not found", "wrong", "incorrect", "fail", "error")
+    ):
+      return False
+    return bool(low)
+  return True
 
 
 async def dolphin_reset_hwid_api(
     key_val: str, lang: str = "bn"
 ) -> tuple[bool, str]:
-  url = f"{DOLPHIN_BASE_URL}/api/v1/reseller/reset-hwid"
-  payload = {"key": key_val.strip()}
-  timeout = aiohttp.ClientTimeout(total=20)
+  clean_key = clean_reset_key_value(key_val)
+  if not clean_key:
+    return (
+        False,
+        "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
+        if lang == "bn"
+        else "❌ Password is incorrect or not found. Try again with a valid password.",
+    )
+
+  endpoints = [
+      f"{DOLPHIN_BASE_URL}/api/v1/reseller/reset-hwid",
+      f"{DOLPHIN_BASE_URL}/api/reseller/reset-hwid",
+      f"{DOLPHIN_BASE_URL}/api/v1/reset-hwid",
+  ]
+  payload = {"key": clean_key, "password": clean_key}
+  timeout = aiohttp.ClientTimeout(total=12)
 
   try:
     async with aiohttp.ClientSession(timeout=timeout) as session:
-      async with session.post(
-          url, headers=get_dolphin_headers(), json=payload
-      ) as resp:
-        raw_txt = await resp.text()
+      for url in endpoints:
         try:
-          data = await resp.json()
-        except Exception:
-          data = {"raw": raw_txt}
+          async with session.post(
+              url, headers=get_dolphin_headers(), json=payload
+          ) as resp:
+            if resp.status == 404:
+              continue
+            raw_txt = await resp.text()
+            try:
+              parsed: dict | list | str = await resp.json()
+            except Exception:
+              parsed = raw_txt
 
-        if 200 <= resp.status < 300:
-          ok_flag = True
-          if isinstance(data, dict) and "success" in data:
-            ok_flag = bool(data["success"])
-
-          if ok_flag:
+            if _is_reset_success_response(resp.status, parsed):
+              return (
+                  True,
+                  "✅ পাসওয়ার্ড রিসেট সফল হয়েছে।"
+                  if lang == "bn"
+                  else "✅ Password reset successful.",
+              )
             return (
-                True,
-                "✅ পাসওয়ার্ড রিসেট সফল হয়েছে।"
+                False,
+                "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
                 if lang == "bn"
-                else "✅ Password reset successful.",
+                else "❌ Password is incorrect or not found. Try again with a valid password.",
             )
+        except aiohttp.ClientError:
+          continue
 
-          return (
-              False,
-              "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
-              if lang == "bn"
-              else "❌ Password is incorrect or not found. Try again with a valid password.",
-          )
-
-        return (
-            False,
-            "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
-            if lang == "bn"
-            else "❌ Password is incorrect or not found. Try again with a valid password.",
-        )
+    return (
+        False,
+        "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
+        if lang == "bn"
+        else "❌ Password is incorrect or not found. Try again with a valid password.",
+    )
 
   except asyncio.TimeoutError:
     return (
@@ -517,12 +599,13 @@ async def dolphin_reset_hwid_api(
 async def dolphin_claim_key_api(
     key_val: str, customer_chat_id: int
 ) -> tuple[bool, str]:
+  clean_key = clean_reset_key_value(key_val)
   url = f"{DOLPHIN_BASE_URL}/api/v1/reseller/claim-key"
   payload = {
-      "key": key_val.strip(),
+      "key": clean_key,
       "customer_chat_id": int(customer_chat_id),
   }
-  timeout = aiohttp.ClientTimeout(total=20)
+  timeout = aiohttp.ClientTimeout(total=12)
 
   try:
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1458,9 +1541,7 @@ async def cmd_claim_key(message: Message):
   await safe_delete_message(uid, message.message_id)
 
   if uid == ADMIN_ID:
-    await message.answer(
-        "⚠️ অ্যাডমিন অ্যাকাউন্ট দিয়ে ক্লেইম লাগে না।"
-    )
+    await message.answer("⚠️ অ্যাডমিন অ্যাকাউন্ট দিয়ে ক্লেইম লাগে না।")
     return
 
   if len(parts) < 2 or not parts[1].strip():
@@ -1476,7 +1557,8 @@ async def cmd_claim_key(message: Message):
   conn = get_conn()
   cur = conn.cursor()
   cur.execute(
-      "SELECT owner_user_id FROM key_ownership WHERE key_value = ? ORDER BY id DESC LIMIT 1",
+      "SELECT owner_user_id FROM key_ownership WHERE key_value = ? ORDER BY id"
+      " DESC LIMIT 1",
       (key_val,),
   )
   row = cur.fetchone()
@@ -1486,7 +1568,10 @@ async def cmd_claim_key(message: Message):
     await message.answer(
         "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
         if lang == "bn"
-        else "❌ Password is incorrect or not found. Try again with a valid password."
+        else (
+            "❌ Password is incorrect or not found. Try again with a valid"
+            " password."
+        )
     )
     return
 
@@ -1495,7 +1580,10 @@ async def cmd_claim_key(message: Message):
     await message.answer(
         "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
         if lang == "bn"
-        else "❌ Password is incorrect or not found. Try again with a valid password."
+        else (
+            "❌ Password is incorrect or not found. Try again with a valid"
+            " password."
+        )
     )
     return
 
@@ -1596,7 +1684,7 @@ async def btn_change_lang(message: Message):
   )
 
 
-@dp.message(F.text.in_(["🔄 রিসেট সিস্টেম", "🔄 Reset System"]))
+@dp.message(F.text.in_(["🔄 রিসেট সিস্টেম", "🔄 Reset System", "Reset System"]))
 async def btn_reset_system(message: Message):
   await open_reset_menu(message)
 
@@ -2978,20 +3066,26 @@ async def handle_messages(message: Message):
           "⏳ রিসেট হচ্ছে..." if lang == "bn" else "⏳ Resetting..."
       )
 
-      allowed, lock_msg = verify_key_ownership(txt, uid, lang)
-      if not allowed:
+      final_msg = (
+          "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
+          if lang == "bn"
+          else (
+              "❌ Password is incorrect or not found. Try again with a valid"
+              " password."
+          )
+      )
+      try:
+        allowed, lock_msg = verify_key_ownership(txt, uid, lang)
+        if not allowed:
+          final_msg = lock_msg
+        else:
+          _, api_msg = await dolphin_reset_hwid_api(txt, lang)
+          final_msg = api_msg
+      finally:
         await safe_delete_message(uid, processing_msg.message_id)
-        await message.answer(
-            lock_msg,
-            reply_markup=back_to_reset_kb(lang),
-        )
-        return
-
-      _, api_msg = await dolphin_reset_hwid_api(txt, lang)
-      await safe_delete_message(uid, processing_msg.message_id)
 
       await message.answer(
-          api_msg,
+          final_msg,
           reply_markup=back_to_reset_kb(lang),
       )
       return
