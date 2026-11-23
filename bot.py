@@ -95,6 +95,13 @@ def canon_duration(dur: str) -> str:
   return s.upper()
 
 
+def format_unit_duration(num_val: int, unit_type: str) -> str:
+  n = max(1, int(num_val))
+  if unit_type == "HOURS":
+    return f"{n} HOUR" if n == 1 else f"{n} HOURS"
+  return f"{n} DAY" if n == 1 else f"{n} DAYS"
+
+
 def parse_clean_price(raw_val: str) -> float:
   s = re.sub(r"[^\d.]", "", (raw_val or "").strip())
   if not s:
@@ -1492,18 +1499,18 @@ def build_welcome_message(full_name: str, lang: str) -> str:
     return (
         f"👋 <b>স্বাগতম, {safe_name}!</b>\n"
         f"✨ <b>ZORO 404 OFFICIAL</b> বটে আপনাকে স্বাগতম।\n\n"
-        f"এখান থেকে সহজে আপনার পছন্দের প্ল্যান বেছে নিয়ে অর্ডার করতে পারবেন এবং নিজের কি রিসেট করতে পারবেন।\n"
+        f"এখান থেকে সহজে আপনার পছন্দের প্ল্যান বেছে নিয়ে অর্ডার করতে পারবেন।\n"
         f"📢 আপডেট চ্যানেল: {ch_link}\n"
         f"💬 সাপোর্ট: <b>{html.escape(SUPPORT_HANDLE)}</b>\n\n"
-        f"🛒 শুরু করতে নিচের <b>পাসওয়ার্ড কিনুন</b> বা <b>রিসেট সিস্টেম</b> বাটনে চাপুন।"
+        f"🛒 শুরু করতে নিচের <b>পাসওয়ার্ড কিনুন</b> বাটনে চাপুন।"
     )
   return (
       f"👋 <b>Welcome, {safe_name}!</b>\n"
       f"✨ Welcome to <b>ZORO 404 OFFICIAL</b>.\n\n"
-      f"Choose your plan to order or reset your own key safely.\n"
+      f"Choose your plan easily to place an order.\n"
       f"📢 Update Channel: {ch_link}\n"
       f"💬 Support: <b>{html.escape(SUPPORT_HANDLE)}</b>\n\n"
-      f"🛒 Tap <b>Buy Keys</b> or <b>Reset System</b> below to get started."
+      f"🛒 Tap <b>Buy Keys</b> below to get started."
   )
 
 
@@ -1741,28 +1748,41 @@ def easy_category_pick_kb() -> InlineKeyboardMarkup:
   )
 
 
-def easy_duration_pick_kb() -> InlineKeyboardMarkup:
+def duration_unit_pick_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[
           [
               InlineKeyboardButton(
-                  text="1 DAY", callback_data="pickdur_1 DAY"
+                  text="🕒 ঘণ্টা (HOURS)", callback_data="pickunit_HOURS"
               ),
               InlineKeyboardButton(
-                  text="7 DAYS", callback_data="pickdur_7 DAYS"
-              ),
-          ],
-          [
-              InlineKeyboardButton(
-                  text="15 DAYS", callback_data="pickdur_15 DAYS"
-              ),
-              InlineKeyboardButton(
-                  text="30 DAYS", callback_data="pickdur_30 DAYS"
+                  text="📅 দিন (DAYS)", callback_data="pickunit_DAYS"
               ),
           ],
           [
               InlineKeyboardButton(
-                  text="✍️ অন্য মেয়াদ লিখুন", callback_data="pickdur_CUSTOM"
+                  text="⬅️ অন্য প্রোডাক্ট বাছুন", callback_data="adm_addplan"
+              ),
+          ],
+      ]
+  )
+
+
+def after_plan_added_kb(pid: int) -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(
+      inline_keyboard=[
+          [
+              InlineKeyboardButton(
+                  text="➕ এই প্রোডাক্টে আরেকটি প্ল্যান যোগ করুন",
+                  callback_data=f"easyplanprod_{pid}",
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="📦 অন্য প্রোডাক্ট বাছুন", callback_data="adm_addplan"
+              ),
+              InlineKeyboardButton(
+                  text="🛠 Admin Panel", callback_data="back_adm_panel"
               ),
           ],
       ]
@@ -1839,9 +1859,7 @@ async def open_reset_menu(message: Message):
   }
 
 
-async def open_admin_panel(message: Message):
-  if message.from_user.id != ADMIN_ID:
-    return
+async def send_admin_panel_to_chat(chat_id: int):
   prev = admin_states.pop(ADMIN_ID, None)
   if prev:
     await safe_delete_messages(
@@ -1859,16 +1877,25 @@ async def open_admin_panel(message: Message):
   o_cnt = cur.fetchone()["cnt"]
   conn.close()
 
-  await message.answer(
-      f"🛠 <b>ADMIN CONTROL</b> ({html.escape(SUPPORT_HANDLE)})\n"
-      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-      f"👥 <b>Total Users:</b> {u_cnt}\n"
-      f"📦 <b>Total Products:</b> {p_cnt}\n"
-      f"⏳ <b>Pending Orders:</b> {o_cnt}\n\n"
-      f"👉 <i>নিচের বাটনে চাপলেই সহজ ধাপে কাজ করতে পারবেন।</i>",
+  await bot.send_message(
+      chat_id=chat_id,
+      text=(
+          f"🛠 <b>ADMIN CONTROL</b> ({html.escape(SUPPORT_HANDLE)})\n"
+          f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+          f"👥 <b>Total Users:</b> {u_cnt}\n"
+          f"📦 <b>Total Products:</b> {p_cnt}\n"
+          f"⏳ <b>Pending Orders:</b> {o_cnt}\n\n"
+          f"👉 <i>নিচের বাটনে চাপলেই সহজ ধাপে কাজ করতে পারবেন।</i>"
+      ),
       parse_mode="HTML",
       reply_markup=admin_panel_kb(),
   )
+
+
+async def open_admin_panel(message: Message):
+  if message.from_user.id != ADMIN_ID:
+    return
+  await send_admin_panel_to_chat(message.chat.id)
 
 
 async def send_support_message(message: Message):
@@ -2731,6 +2758,15 @@ async def btn_admin_panel(message: Message):
   await open_admin_panel(message)
 
 
+@dp.callback_query(F.data == "back_adm_panel")
+async def cb_back_adm_panel(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  await safe_delete_message(callback.message.chat.id, callback.message.message_id)
+  await send_admin_panel_to_chat(callback.message.chat.id)
+  await callback.answer()
+
+
 @dp.callback_query(F.data == "adm_backup")
 async def cb_adm_backup(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
@@ -2913,17 +2949,25 @@ async def cb_easy_pick_prod_cat(callback: CallbackQuery):
       "INSERT INTO products (name, category) VALUES (?, ?)",
       (pname, cat_val),
   )
+  pid = cur.lastrowid
   conn.commit()
   conn.close()
 
   admin_states.pop(ADMIN_ID, None)
   await safe_delete_message(ADMIN_ID, callback.message.message_id)
-  done = await callback.message.answer(
-      f"✅ প্রোডাক্ট <b>{html.escape(pname)}</b> [{html.escape(cat_val)}] যোগ হয়েছে!",
+  await callback.message.answer(
+      f"✅ প্রোডাক্ট <b>{html.escape(pname)}</b> [{html.escape(cat_val)}] যোগ হয়েছে!\n"
+      f"এখন এই প্রোডাক্টে প্ল্যান যোগ করতে নিচের বাটনে চাপুন:",
       parse_mode="HTML",
+      reply_markup=InlineKeyboardMarkup(
+          inline_keyboard=[[
+              InlineKeyboardButton(
+                  text="⏱ এই প্রোডাক্টে প্ল্যান যোগ করুন",
+                  callback_data=f"easyplanprod_{pid}",
+              )
+          ]]
+      ),
   )
-  await asyncio.sleep(3)
-  await safe_delete_message(ADMIN_ID, done.message_id)
   await callback.answer()
 
 
@@ -3006,7 +3050,7 @@ async def cb_adm_addplan(callback: CallbackQuery):
       ]
       for r in prods
   ]
-  await callback.message.answer(
+  await callback.message.edit_text(
       "⏱ <b>কোন প্রোডাক্টে প্ল্যান যোগ করবেন? বাটনে চাপুন:</b>",
       parse_mode="HTML",
       reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
@@ -3030,25 +3074,25 @@ async def cb_easy_plan_prod(callback: CallbackQuery):
     return
 
   admin_states[ADMIN_ID] = {
-      "step": "easy_plan_wait_dur",
+      "step": "easy_plan_pick_unit",
       "plan_pid": pid,
       "plan_pname": prow["name"],
       "prompt_msg_id": callback.message.message_id,
   }
   await callback.message.edit_text(
       f"📦 প্রোডাক্ট: <b>{html.escape(prow['name'])}</b>\n"
-      f"⏱ <b>মেয়াদ সিলেক্ট করুন বা লিখে পাঠান</b> (যেমন: <code>3 DAYS</code> বা <code>12 HOURS</code>):",
+      f"⏱ <b>মেয়াদ কিসে দেবেন? ঘণ্টা নাকি দিন সিলেক্ট করুন:</b>",
       parse_mode="HTML",
-      reply_markup=easy_duration_pick_kb(),
+      reply_markup=duration_unit_pick_kb(),
   )
   await callback.answer()
 
 
-@dp.callback_query(F.data.startswith("pickdur_"))
-async def cb_easy_pick_dur(callback: CallbackQuery):
+@dp.callback_query(F.data.startswith("pickunit_"))
+async def cb_pick_duration_unit(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
     return
-  choice = callback.data.split("_", 1)[1]
+  unit_type = callback.data.split("_", 1)[1]
   state = admin_states.get(ADMIN_ID) or {}
   pid = state.get("plan_pid")
   pname = state.get("plan_pname") or ""
@@ -3056,35 +3100,26 @@ async def cb_easy_pick_dur(callback: CallbackQuery):
     await callback.answer("আবার Add Plan চাপুন।", show_alert=True)
     return
 
-  if choice == "CUSTOM":
-    admin_states[ADMIN_ID] = {
-        "step": "easy_plan_wait_dur",
-        "plan_pid": pid,
-        "plan_pname": pname,
-        "prompt_msg_id": callback.message.message_id,
-    }
-    await callback.message.edit_text(
-        f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
-        f"✍️ <b>মেয়াদ লিখে পাঠান</b> (যেমন: <code>3 DAYS</code> বা <code>12 HOURS</code>):",
-        parse_mode="HTML",
-    )
-    await callback.answer()
-    return
-
-  dur = canon_duration(choice)
   admin_states[ADMIN_ID] = {
-      "step": "easy_plan_wait_price",
+      "step": "easy_plan_wait_num",
       "plan_pid": pid,
       "plan_pname": pname,
-      "plan_dur": dur,
+      "plan_unit": unit_type,
       "prompt_msg_id": callback.message.message_id,
   }
-  await callback.message.edit_text(
-      f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
-      f"⏱ মেয়াদ: <b>{html.escape(dur)}</b>\n"
-      f"💵 <b>দাম কত? শুধু সংখ্যা লিখুন</b> (যেমন: <code>300</code>):",
-      parse_mode="HTML",
-  )
+  if unit_type == "HOURS":
+    prompt_txt = (
+        f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
+        f"🕒 ইউনিট: <b>ঘণ্টা (HOURS)</b>\n"
+        f"✍️ <b>কত ঘণ্টা অ্যাড করতে চান? শুধু সংখ্যা লিখুন</b> (যেমন: <code>1</code>, <code>2</code>, <code>6</code>):"
+    )
+  else:
+    prompt_txt = (
+        f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
+        f"📅 ইউনিট: <b>দিন (DAYS)</b>\n"
+        f"✍️ <b>কত দিন অ্যাড করতে চান? শুধু সংখ্যা লিখুন</b> (যেমন: <code>1</code>, <code>10</code>, <code>20</code>):"
+    )
+  await callback.message.edit_text(prompt_txt, parse_mode="HTML")
   await callback.answer()
 
 
@@ -3471,10 +3506,16 @@ async def handle_messages(message: Message):
       admin_states[uid]["prompt_msg_id"] = sent.message_id
       return
 
-    if step == "easy_plan_wait_dur":
-      if not txt:
+    if step == "easy_plan_wait_num":
+      digits_only = re.sub(r"[^\d]", "", txt)
+      if not digits_only or int(digits_only) <= 0:
+        warn = await message.answer("❌ সঠিক সংখ্যা লিখুন (যেমন: 1, 6, 10, 20)")
+        await asyncio.sleep(2)
+        await safe_delete_message(uid, warn.message_id)
         return
-      dur = canon_duration(txt)
+      num_val = int(digits_only)
+      unit_type = state.get("plan_unit") or "DAYS"
+      dur = format_unit_duration(num_val, unit_type)
       pid = state.get("plan_pid")
       pname = state.get("plan_pname") or ""
       admin_states[uid] = {
@@ -3542,15 +3583,14 @@ async def handle_messages(message: Message):
 
       admin_states.pop(uid, None)
       await safe_delete_messages(uid, [message.message_id, prompt_id])
-      done = await message.answer(
+      await message.answer(
           f"✅ প্ল্যান যোগ হয়েছে!\n"
           f"• প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
           f"• মেয়াদ: <b>{html.escape(dur)}</b>\n"
           f"• দাম: <b>৳{brand_price:.0f}</b>{html.escape(format_bonus_bracket(bonus))}",
           parse_mode="HTML",
+          reply_markup=after_plan_added_kb(int(pid)),
       )
-      await asyncio.sleep(3)
-      await safe_delete_message(uid, done.message_id)
       return
 
     if step == "easy_edit_wait_price":
