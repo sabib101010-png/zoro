@@ -84,15 +84,25 @@ def canon_name(name: str) -> str:
 
 def canon_duration(dur: str) -> str:
   s = re.sub(r"\s+", " ", (dur or "").strip())
-  m = re.fullmatch(r"(\d+)\s*(hours?|hrs?)", s, flags=re.I)
+  m = re.fullmatch(r"(\d+)\s*(hours?|hrs?|ঘণ্টা|ঘন্টা|h)", s, flags=re.I)
   if m:
     n = int(m.group(1))
     return f"{n} HOUR" if n == 1 else f"{n} HOURS"
-  m = re.fullmatch(r"(\d+)\s*days?", s, flags=re.I)
+  m = re.fullmatch(r"(\d+)\s*(days?|দিন|d)", s, flags=re.I)
   if m:
     n = int(m.group(1))
     return f"{n} DAY" if n == 1 else f"{n} DAYS"
   return s.upper()
+
+
+def parse_clean_price(raw_val: str) -> float:
+  s = re.sub(r"[^\d.]", "", (raw_val or "").strip())
+  if not s:
+    return 0.0
+  try:
+    return float(s)
+  except ValueError:
+    return 0.0
 
 
 def round_to_zero(amount: float) -> float:
@@ -1042,38 +1052,42 @@ def build_approved_order_message(
   )
 
 
-def is_valid_bd_mobile(text: str) -> bool:
+def normalize_bd_mobile(text: str) -> str | None:
   cleaned = re.sub(r"[\s\-\+]", "", text or "")
   if cleaned.startswith("880"):
     cleaned = "0" + cleaned[3:]
-  return bool(re.fullmatch(r"01[3-9]\d{8}", cleaned))
+  if re.fullmatch(r"01[3-9]\d{8}", cleaned):
+    return cleaned
+  return None
 
 
-def is_valid_trx_or_proof_text(text: str) -> tuple[bool, str]:
+def is_valid_bd_mobile(text: str) -> bool:
+  return normalize_bd_mobile(text) is not None
+
+
+def is_valid_trx_or_proof_text(text: str) -> tuple[bool, str, bool]:
   raw = (text or "").strip()
   if not raw:
-    return False, ""
+    return False, "", False
 
-  if is_valid_bd_mobile(raw):
-    cleaned = re.sub(r"[\s\-\+]", "", raw)
-    if cleaned.startswith("880"):
-      cleaned = "0" + cleaned[3:]
-    return True, cleaned
+  mob = normalize_bd_mobile(raw)
+  if mob:
+    return True, mob, True
 
   trx = re.sub(r"[^A-Za-z0-9]", "", raw).upper()
   if len(trx) < 8 or len(trx) > 16:
-    return False, trx
+    return False, trx, False
 
   has_digit = any(ch.isdigit() for ch in trx)
   has_alpha = any(ch.isalpha() for ch in trx)
   if not (has_digit and has_alpha):
-    return False, trx
+    return False, trx, False
 
   if re.search(r"(.)\1{3,}", trx):
-    return False, trx
+    return False, trx, False
 
   if re.fullmatch(r"([A-Z0-9]{2,3})\1{1,5}", trx):
-    return False, trx
+    return False, trx, False
 
   junk_tokens = (
       "QWERTY",
@@ -1086,12 +1100,15 @@ def is_valid_trx_or_proof_text(text: str) -> tuple[bool, str]:
       "ABCD",
   )
   if any(tok in trx for tok in junk_tokens):
-    return False, trx
+    return False, trx, False
 
-  return True, trx
+  return True, trx, False
 
 
-def is_duplicate_proof(proof_val: str) -> bool:
+def is_duplicate_proof(proof_val: str, is_mobile: bool = False) -> bool:
+  if is_mobile:
+    return False
+
   val = (proof_val or "").strip().upper()
   if not val:
     return False
@@ -1101,7 +1118,7 @@ def is_duplicate_proof(proof_val: str) -> bool:
   cur.execute(
       """
         SELECT COUNT(*) AS cnt FROM orders
-        WHERE UPPER(TRIM(trx_id)) = ? AND status IN ('pending', 'approved')
+        WHERE UPPER(TRIM(trx_id)) = ? AND status IN ('pending_payment', 'pending', 'approved')
         """,
       (val,),
   )
@@ -1696,6 +1713,62 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
   )
 
 
+def easy_category_pick_kb() -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(
+      inline_keyboard=[
+          [
+              InlineKeyboardButton(
+                  text="🛡 ROOT", callback_data="pickprodcat_ROOT"
+              ),
+              InlineKeyboardButton(
+                  text="🔓 NON ROOT", callback_data="pickprodcat_NON_ROOT"
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="📱 IOS", callback_data="pickprodcat_IOS"
+              ),
+              InlineKeyboardButton(
+                  text="💻 PC / LAPTOP", callback_data="pickprodcat_PC_LAPTOP"
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="🌐 ALL", callback_data="pickprodcat_ALL"
+              ),
+          ],
+      ]
+  )
+
+
+def easy_duration_pick_kb() -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(
+      inline_keyboard=[
+          [
+              InlineKeyboardButton(
+                  text="1 DAY", callback_data="pickdur_1 DAY"
+              ),
+              InlineKeyboardButton(
+                  text="7 DAYS", callback_data="pickdur_7 DAYS"
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="15 DAYS", callback_data="pickdur_15 DAYS"
+              ),
+              InlineKeyboardButton(
+                  text="30 DAYS", callback_data="pickdur_30 DAYS"
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="✍️ অন্য মেয়াদ লিখুন", callback_data="pickdur_CUSTOM"
+              ),
+          ],
+      ]
+  )
+
+
 def payment_numbers_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[[
@@ -1791,7 +1864,8 @@ async def open_admin_panel(message: Message):
       f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"👥 <b>Total Users:</b> {u_cnt}\n"
       f"📦 <b>Total Products:</b> {p_cnt}\n"
-      f"⏳ <b>Pending Orders:</b> {o_cnt}",
+      f"⏳ <b>Pending Orders:</b> {o_cnt}\n\n"
+      f"👉 <i>নিচের বাটনে চাপলেই সহজ ধাপে কাজ করতে পারবেন।</i>",
       parse_mode="HTML",
       reply_markup=admin_panel_kb(),
   )
@@ -2803,19 +2877,53 @@ async def cb_adm_broadcast(callback: CallbackQuery):
   await callback.answer()
 
 
+# ==========================================
+# EASY PRODUCT & PLAN ADMIN WORKFLOWS
+# ==========================================
 @dp.callback_query(F.data == "adm_addprod")
 async def cb_adm_addprod(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
     return
   prompt = await callback.message.answer(
-      "নতুন প্রোডাক্ট যোগ করতে লিখুন:\n"
-      "ProductName | Category (ROOT / NON_ROOT / IOS / PC_LAPTOP / ALL)\n"
-      "উদাহরণ: SHARK PANEL | ROOT"
+      "➕ <b>নতুন প্রোডাক্ট যোগ করুন</b>\n"
+      "শুধু প্রোডাক্টের <b>নাম</b> লিখে পাঠান (যেমন: <code>SHARK PANEL</code>):",
+      parse_mode="HTML",
   )
   admin_states[callback.from_user.id] = {
-      "step": "add_prod",
+      "step": "easy_addprod_name",
       "prompt_msg_id": prompt.message_id,
   }
+  await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("pickprodcat_"))
+async def cb_easy_pick_prod_cat(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  cat_val = callback.data.split("_", 1)[1]
+  state = admin_states.get(ADMIN_ID) or {}
+  pname = (state.get("new_prod_name") or "").strip()
+  if not pname:
+    await callback.answer("আগে প্রোডাক্টের নাম দিন।", show_alert=True)
+    return
+
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute(
+      "INSERT INTO products (name, category) VALUES (?, ?)",
+      (pname, cat_val),
+  )
+  conn.commit()
+  conn.close()
+
+  admin_states.pop(ADMIN_ID, None)
+  await safe_delete_message(ADMIN_ID, callback.message.message_id)
+  done = await callback.message.answer(
+      f"✅ প্রোডাক্ট <b>{html.escape(pname)}</b> [{html.escape(cat_val)}] যোগ হয়েছে!",
+      parse_mode="HTML",
+  )
+  await asyncio.sleep(3)
+  await safe_delete_message(ADMIN_ID, done.message_id)
   await callback.answer()
 
 
@@ -2833,17 +2941,45 @@ async def cb_adm_delprod(callback: CallbackQuery):
     await callback.answer("কোনো প্রোডাক্ট নেই।", show_alert=True)
     return
 
-  plist = "\n".join(
-      [f"ProductID {r['id']}: {r['name']} [{r['category']}]" for r in prods]
+  rows = [
+      [
+          InlineKeyboardButton(
+              text=f"🗑 {r['name']} [{r['category']}]",
+              callback_data=f"easydelprod_{r['id']}",
+          )
+      ]
+      for r in prods
+  ]
+  await callback.message.answer(
+      "🗑 <b>যে প্রোডাক্ট ডিলিট করতে চান তাতে চাপুন:</b>",
+      parse_mode="HTML",
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
   )
-  prompt = await callback.message.answer(
-      f"প্রোডাক্ট লিস্ট:\n{plist}\n\n"
-      f"যে প্রোডাক্ট রিমুভ করতে চান তার ProductID লিখে পাঠান:"
-  )
-  admin_states[callback.from_user.id] = {
-      "step": "del_prod",
-      "prompt_msg_id": prompt.message_id,
-  }
+  await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("easydelprod_"))
+async def cb_easy_delprod(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  pid = int(callback.data.split("_", 1)[1])
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT name FROM products WHERE id = ?", (pid,))
+  prow = cur.fetchone()
+  if prow:
+    cur.execute("DELETE FROM plans WHERE product_id = ?", (pid,))
+    cur.execute("DELETE FROM products WHERE id = ?", (pid,))
+    conn.commit()
+  conn.close()
+  await safe_delete_message(ADMIN_ID, callback.message.message_id)
+  if prow:
+    done = await callback.message.answer(
+        f"🗑 প্রোডাক্ট <b>{html.escape(prow['name'])}</b> ডিলিট হয়েছে।",
+        parse_mode="HTML",
+    )
+    await asyncio.sleep(3)
+    await safe_delete_message(ADMIN_ID, done.message_id)
   await callback.answer()
 
 
@@ -2861,22 +2997,94 @@ async def cb_adm_addplan(callback: CallbackQuery):
     await callback.answer("আগে একটি প্রোডাক্ট যোগ করুন।", show_alert=True)
     return
 
-  plist = "\n".join(
-      [f"{r['id']} = {r['name']} [{r['category']}]" for r in prods]
+  rows = [
+      [
+          InlineKeyboardButton(
+              text=f"📦 {r['name']} [{r['category']}]",
+              callback_data=f"easyplanprod_{r['id']}",
+          )
+      ]
+      for r in prods
+  ]
+  await callback.message.answer(
+      "⏱ <b>কোন প্রোডাক্টে প্ল্যান যোগ করবেন? বাটনে চাপুন:</b>",
+      parse_mode="HTML",
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
   )
-  prompt = await callback.message.answer(
-      f"প্রোডাক্ট লিস্ট:\n{plist}\n\n"
-      f"প্ল্যান যোগ করতে লিখুন:\n"
-      f"ProductID | Duration | SitePrice | Offer(ঐচ্ছিক)\n"
-      f"উদাহরণ:\n"
-      f"2 | 7 Days | 300\n"
-      f"2 | 30 Days | 700 | (1 Day Free)\n\n"
-      f"বের হতে /start দিন।"
-  )
-  admin_states[callback.from_user.id] = {
-      "step": "add_plan_loop",
-      "prompt_msg_id": prompt.message_id,
+  await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("easyplanprod_"))
+async def cb_easy_plan_prod(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  pid = int(callback.data.split("_", 1)[1])
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT name FROM products WHERE id = ?", (pid,))
+  prow = cur.fetchone()
+  conn.close()
+
+  if not prow:
+    await callback.answer("প্রোডাক্ট পাওয়া যায়নি।", show_alert=True)
+    return
+
+  admin_states[ADMIN_ID] = {
+      "step": "easy_plan_wait_dur",
+      "plan_pid": pid,
+      "plan_pname": prow["name"],
+      "prompt_msg_id": callback.message.message_id,
   }
+  await callback.message.edit_text(
+      f"📦 প্রোডাক্ট: <b>{html.escape(prow['name'])}</b>\n"
+      f"⏱ <b>মেয়াদ সিলেক্ট করুন বা লিখে পাঠান</b> (যেমন: <code>3 DAYS</code> বা <code>12 HOURS</code>):",
+      parse_mode="HTML",
+      reply_markup=easy_duration_pick_kb(),
+  )
+  await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("pickdur_"))
+async def cb_easy_pick_dur(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  choice = callback.data.split("_", 1)[1]
+  state = admin_states.get(ADMIN_ID) or {}
+  pid = state.get("plan_pid")
+  pname = state.get("plan_pname") or ""
+  if not pid:
+    await callback.answer("আবার Add Plan চাপুন।", show_alert=True)
+    return
+
+  if choice == "CUSTOM":
+    admin_states[ADMIN_ID] = {
+        "step": "easy_plan_wait_dur",
+        "plan_pid": pid,
+        "plan_pname": pname,
+        "prompt_msg_id": callback.message.message_id,
+    }
+    await callback.message.edit_text(
+        f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
+        f"✍️ <b>মেয়াদ লিখে পাঠান</b> (যেমন: <code>3 DAYS</code> বা <code>12 HOURS</code>):",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+    return
+
+  dur = canon_duration(choice)
+  admin_states[ADMIN_ID] = {
+      "step": "easy_plan_wait_price",
+      "plan_pid": pid,
+      "plan_pname": pname,
+      "plan_dur": dur,
+      "prompt_msg_id": callback.message.message_id,
+  }
+  await callback.message.edit_text(
+      f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
+      f"⏱ মেয়াদ: <b>{html.escape(dur)}</b>\n"
+      f"💵 <b>দাম কত? শুধু সংখ্যা লিখুন</b> (যেমন: <code>300</code>):",
+      parse_mode="HTML",
+  )
   await callback.answer()
 
 
@@ -2899,19 +3107,54 @@ async def cb_adm_delplan(callback: CallbackQuery):
     await callback.answer("কোনো প্ল্যান নেই।", show_alert=True)
     return
 
-  plan_lines = "\n".join([
-      f"PlanID {r['id']}: {r['name']} - {r['duration']}"
-      f" (৳{float(r['price']):.0f}) {format_bonus_bracket(r['bonus'])}"
+  kb_rows = [
+      [
+          InlineKeyboardButton(
+              text=(
+                  f"🗑 {r['name']} — {r['duration']} (৳{float(r['price']):.0f})"
+              ),
+              callback_data=f"easydelplan_{r['id']}",
+          )
+      ]
       for r in rows
-  ])
-  prompt = await callback.message.answer(
-      f"সব প্ল্যান লিস্ট:\n{plan_lines}\n\n"
-      f"যে প্ল্যান রিমুভ করতে চান তার PlanID লিখে পাঠান (বের হতে /start দিন):"
+  ]
+  await callback.message.answer(
+      "🗑 <b>যে প্ল্যান ডিলিট করতে চান তাতে চাপুন:</b>",
+      parse_mode="HTML",
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
   )
-  admin_states[callback.from_user.id] = {
-      "step": "del_plan_loop",
-      "prompt_msg_id": prompt.message_id,
-  }
+  await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("easydelplan_"))
+async def cb_easy_delplan(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  plid = int(callback.data.split("_", 1)[1])
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute(
+      """
+        SELECT pl.duration, p.name
+        FROM plans pl
+        JOIN products p ON pl.product_id = p.id
+        WHERE pl.id = ?
+        """,
+      (plid,),
+    )
+  prow = cur.fetchone()
+  if prow:
+    cur.execute("DELETE FROM plans WHERE id = ?", (plid,))
+    conn.commit()
+  conn.close()
+  await safe_delete_message(ADMIN_ID, callback.message.message_id)
+  if prow:
+    done = await callback.message.answer(
+        f"🗑 প্ল্যান <b>{html.escape(prow['name'])} — {html.escape(prow['duration'])}</b> ডিলিট হয়েছে।",
+        parse_mode="HTML",
+    )
+    await asyncio.sleep(3)
+    await safe_delete_message(ADMIN_ID, done.message_id)
   await callback.answer()
 
 
@@ -2934,21 +3177,58 @@ async def cb_adm_editplan(callback: CallbackQuery):
     await callback.answer("কোনো প্ল্যান নেই।", show_alert=True)
     return
 
-  plan_lines = "\n".join([
-      f"PlanID {r['id']}: {r['name']} - {r['duration']} |"
-      f" ৳{float(r['price']):.0f} | Stock: {r['stock']}"
+  kb_rows = [
+      [
+          InlineKeyboardButton(
+              text=(
+                  f"✏️ {r['name']} — {r['duration']} (৳{float(r['price']):.0f})"
+              ),
+              callback_data=f"easyeditplan_{r['id']}",
+          )
+      ]
       for r in rows
-  ])
-  prompt = await callback.message.answer(
-      f"প্ল্যান লিস্ট:\n{plan_lines}\n\n"
-      f"দাম বা স্টক বদলাতে লিখুন:\n"
-      f"PlanID | BrandPrice | NewStock(ঐচ্ছিক)\n"
-      f"উদাহরণ: 3 | 120 | 25"
+  ]
+  await callback.message.answer(
+      "✏️ <b>কোন প্ল্যানের দাম বদলাতে চান? চাপুন:</b>",
+      parse_mode="HTML",
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
   )
-  admin_states[callback.from_user.id] = {
-      "step": "edit_plan",
-      "prompt_msg_id": prompt.message_id,
+  await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("easyeditplan_"))
+async def cb_easy_editplan_pick(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  plid = int(callback.data.split("_", 1)[1])
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute(
+      """
+        SELECT pl.id, pl.duration, pl.price, p.name
+        FROM plans pl
+        JOIN products p ON pl.product_id = p.id
+        WHERE pl.id = ?
+        """,
+      (plid,),
+    )
+  prow = cur.fetchone()
+  conn.close()
+  if not prow:
+    await callback.answer("প্ল্যান পাওয়া যায়নি।", show_alert=True)
+    return
+
+  admin_states[ADMIN_ID] = {
+      "step": "easy_edit_wait_price",
+      "edit_plid": plid,
+      "prompt_msg_id": callback.message.message_id,
   }
+  await callback.message.edit_text(
+      f"✏️ <b>{html.escape(prow['name'])} — {html.escape(prow['duration'])}</b>\n"
+      f"বর্তমান দাম: <b>৳{float(prow['price']):.0f}</b>\n"
+      f"নতুন দাম কত? শুধু সংখ্যা লিখুন:",
+      parse_mode="HTML",
+  )
   await callback.answer()
 
 
@@ -2971,21 +3251,58 @@ async def cb_adm_setoffer(callback: CallbackQuery):
     await callback.answer("কোনো প্ল্যান নেই।", show_alert=True)
     return
 
-  plan_lines = "\n".join([
-      f"PlanID {r['id']}: {r['name']} - {r['duration']}"
-      f" (৳{float(r['price']):.0f}) {format_bonus_bracket(r['bonus'])}"
+  kb_rows = [
+      [
+          InlineKeyboardButton(
+              text=(
+                  f"🎁 {r['name']} — {r['duration']} {format_bonus_bracket(r['bonus'])}"
+              ),
+              callback_data=f"easyofferplan_{r['id']}",
+          )
+      ]
       for r in rows
-  ])
-  prompt = await callback.message.answer(
-      f"প্ল্যান আইডি গুলো:\n{plan_lines}\n\n"
-      f"অফার সেট করতে লিখুন:\n"
-      f"PlanID | Offer Text (মুছতে চাইলে PlanID | -)\n"
-      f"উদাহরণ: 3 | (1 Day 1 Key Free)"
+  ]
+  await callback.message.answer(
+      "🎁 <b>কোন প্ল্যানে অফার সেট বা রিমুভ করবেন? চাপুন:</b>",
+      parse_mode="HTML",
+      reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows),
   )
-  admin_states[callback.from_user.id] = {
-      "step": "set_offer",
-      "prompt_msg_id": prompt.message_id,
+  await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("easyofferplan_"))
+async def cb_easy_offer_pick(callback: CallbackQuery):
+  if callback.from_user.id != ADMIN_ID:
+    return
+  plid = int(callback.data.split("_", 1)[1])
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute(
+      """
+        SELECT pl.id, pl.duration, pl.bonus, p.name
+        FROM plans pl
+        JOIN products p ON pl.product_id = p.id
+        WHERE pl.id = ?
+        """,
+      (plid,),
+    )
+  prow = cur.fetchone()
+  conn.close()
+  if not prow:
+    await callback.answer("প্ল্যান পাওয়া যায়নি।", show_alert=True)
+    return
+
+  admin_states[ADMIN_ID] = {
+      "step": "easy_offer_wait_text",
+      "offer_plid": plid,
+      "prompt_msg_id": callback.message.message_id,
   }
+  await callback.message.edit_text(
+      f"🎁 <b>{html.escape(prow['name'])} — {html.escape(prow['duration'])}</b>\n"
+      f"অফার টেক্সট লিখুন (যেমন: <code>1 Day Free</code>)\n"
+      f"অথবা অফার মুছে ফেলতে লিখুন: <code>-</code>",
+      parse_mode="HTML",
+  )
   await callback.answer()
 
 
@@ -3136,6 +3453,167 @@ async def handle_messages(message: Message):
         )
       return
 
+    if step == "easy_addprod_name":
+      if not txt:
+        return
+      admin_states[uid] = {
+          "step": "easy_addprod_cat",
+          "new_prod_name": txt,
+          "prompt_msg_id": prompt_id,
+      }
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      sent = await message.answer(
+          f"📦 প্রোডাক্ট: <b>{html.escape(txt)}</b>\n"
+          f"<b>ক্যাটাগরি বাটনে চাপুন:</b>",
+          parse_mode="HTML",
+          reply_markup=easy_category_pick_kb(),
+      )
+      admin_states[uid]["prompt_msg_id"] = sent.message_id
+      return
+
+    if step == "easy_plan_wait_dur":
+      if not txt:
+        return
+      dur = canon_duration(txt)
+      pid = state.get("plan_pid")
+      pname = state.get("plan_pname") or ""
+      admin_states[uid] = {
+          "step": "easy_plan_wait_price",
+          "plan_pid": pid,
+          "plan_pname": pname,
+          "plan_dur": dur,
+          "prompt_msg_id": prompt_id,
+      }
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      sent = await message.answer(
+          f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
+          f"⏱ মেয়াদ: <b>{html.escape(dur)}</b>\n"
+          f"💵 <b>দাম কত? শুধু সংখ্যা লিখুন</b> (যেমন: <code>300</code>):",
+          parse_mode="HTML",
+      )
+      admin_states[uid]["prompt_msg_id"] = sent.message_id
+      return
+
+    if step == "easy_plan_wait_price":
+      raw_price = parse_clean_price(txt)
+      if raw_price <= 0:
+        warn = await message.answer("❌ সঠিক দাম লিখুন (যেমন: 300)")
+        await asyncio.sleep(2)
+        await safe_delete_message(uid, warn.message_id)
+        return
+      pid = state.get("plan_pid")
+      pname = state.get("plan_pname") or ""
+      dur = state.get("plan_dur") or "1 DAY"
+      admin_states[uid] = {
+          "step": "easy_plan_wait_offer",
+          "plan_pid": pid,
+          "plan_pname": pname,
+          "plan_dur": dur,
+          "plan_raw_price": raw_price,
+          "prompt_msg_id": prompt_id,
+      }
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      sent = await message.answer(
+          f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
+          f"⏱ মেয়াদ: <b>{html.escape(dur)}</b> | দাম: <b>৳{raw_price:.0f}</b>\n"
+          f"🎁 কোনো অফার থাকলে লিখুন, না থাকলে <code>skip</code> বা <code>-</code> লিখুন:",
+          parse_mode="HTML",
+      )
+      admin_states[uid]["prompt_msg_id"] = sent.message_id
+      return
+
+    if step == "easy_plan_wait_offer":
+      pid = state.get("plan_pid")
+      pname = state.get("plan_pname") or ""
+      dur = state.get("plan_dur") or "1 DAY"
+      raw_price = float(state.get("plan_raw_price") or 0.0)
+      bonus = "" if txt.lower() in ("-", "skip", "no", "none", "0") else txt
+
+      brand_price = calc_brand_price(raw_price, pname, dur)
+      conn = get_conn()
+      cur = conn.cursor()
+      cur.execute(
+          "INSERT INTO plans (product_id, duration, price, stock, bonus)"
+          " VALUES (?, ?, ?, 20, ?)",
+          (pid, dur, brand_price, bonus),
+      )
+      conn.commit()
+      conn.close()
+
+      admin_states.pop(uid, None)
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      done = await message.answer(
+          f"✅ প্ল্যান যোগ হয়েছে!\n"
+          f"• প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
+          f"• মেয়াদ: <b>{html.escape(dur)}</b>\n"
+          f"• দাম: <b>৳{brand_price:.0f}</b>{html.escape(format_bonus_bracket(bonus))}",
+          parse_mode="HTML",
+      )
+      await asyncio.sleep(3)
+      await safe_delete_message(uid, done.message_id)
+      return
+
+    if step == "easy_edit_wait_price":
+      raw_p = parse_clean_price(txt)
+      if raw_p <= 0:
+        return
+      plid = state.get("edit_plid")
+      conn = get_conn()
+      cur = conn.cursor()
+      cur.execute(
+          """
+                SELECT pl.id, p.name
+                FROM plans pl
+                JOIN products p ON pl.product_id = p.id
+                WHERE pl.id = ?
+                """,
+          (plid,),
+      )
+      prow = cur.fetchone()
+      new_price = 0.0
+      if prow:
+        new_price = (
+            round_to_0_or_5(raw_p)
+            if is_dolphin_product(prow["name"])
+            else round_to_zero(raw_p)
+        )
+        cur.execute(
+            "UPDATE plans SET price = ? WHERE id = ?",
+            (new_price, plid),
+        )
+        conn.commit()
+      conn.close()
+      admin_states.pop(uid, None)
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      if prow:
+        done = await message.answer(
+            f"✅ নতুন দাম সেট হয়েছে: <b>৳{new_price:.0f}</b>",
+            parse_mode="HTML",
+        )
+        await asyncio.sleep(3)
+        await safe_delete_message(uid, done.message_id)
+      return
+
+    if step == "easy_offer_wait_text":
+      if not txt:
+        return
+      plid = state.get("offer_plid")
+      final_offer = "" if txt == "-" or txt.lower() == "skip" else txt
+      conn = get_conn()
+      cur = conn.cursor()
+      cur.execute("UPDATE plans SET bonus = ? WHERE id = ?", (final_offer, plid))
+      conn.commit()
+      conn.close()
+      admin_states.pop(uid, None)
+      await safe_delete_messages(uid, [message.message_id, prompt_id])
+      done = await message.answer(
+          f"✅ অফার আপডেট হয়েছে: <b>{html.escape(final_offer or 'Removed')}</b>",
+          parse_mode="HTML",
+      )
+      await asyncio.sleep(3)
+      await safe_delete_message(uid, done.message_id)
+      return
+
     if step == "set_pay_num":
       if len(txt) < 4:
         return
@@ -3255,225 +3733,6 @@ async def handle_messages(message: Message):
       await safe_delete_message(uid, done.message_id)
       return
 
-    elif step == "add_prod":
-      parts = [x.strip() for x in txt.split("|", 1)]
-      pname = parts[0]
-      cat_raw = parts[1].upper() if len(parts) > 1 else "ALL"
-      valid_cats = {"ROOT", "NON_ROOT", "IOS", "PC_LAPTOP", "ALL"}
-      cat_val = cat_raw if cat_raw in valid_cats else "ALL"
-      if not pname:
-        return
-
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute(
-          "INSERT INTO products (name, category) VALUES (?, ?)",
-          (pname, cat_val),
-      )
-      pid = cur.lastrowid
-      conn.commit()
-      conn.close()
-      admin_states.pop(uid, None)
-      await safe_delete_messages(uid, [message.message_id, prompt_id])
-      done = await message.answer(
-          f"✅ প্রোডাক্ট '{pname}' (ID: {pid}) [{cat_val}] যোগ হয়েছে।"
-      )
-      await asyncio.sleep(3)
-      await safe_delete_message(uid, done.message_id)
-      return
-
-    elif step == "del_prod":
-      try:
-        pid = int(txt)
-      except ValueError:
-        return
-
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute("SELECT name FROM products WHERE id = ?", (pid,))
-      prow = cur.fetchone()
-      if not prow:
-        conn.close()
-        return
-
-      cur.execute("DELETE FROM plans WHERE product_id = ?", (pid,))
-      cur.execute("DELETE FROM products WHERE id = ?", (pid,))
-      conn.commit()
-      conn.close()
-      admin_states.pop(uid, None)
-      await safe_delete_messages(uid, [message.message_id, prompt_id])
-      done = await message.answer(
-          f"🗑 প্রোডাক্ট '{prow['name']}' (ID: {pid}) রিমুভ হয়েছে।"
-      )
-      await asyncio.sleep(3)
-      await safe_delete_message(uid, done.message_id)
-      return
-
-    elif step == "add_plan_loop":
-      lines = [line.strip() for line in txt.splitlines() if line.strip()]
-      if not lines:
-        return
-
-      conn = get_conn()
-      cur = conn.cursor()
-      added_items = []
-
-      for line in lines:
-        parts = [x.strip() for x in line.split("|")]
-        if len(parts) < 3:
-          continue
-        try:
-          pid = int(parts[0])
-          dur = canon_duration(parts[1])
-          site_price = float(parts[2])
-          bonus = parts[3] if len(parts) >= 4 else ""
-          if not dur or site_price <= 0:
-            raise ValueError()
-        except ValueError:
-          continue
-
-        cur.execute("SELECT name FROM products WHERE id = ?", (pid,))
-        prow = cur.fetchone()
-        if not prow:
-          continue
-
-        pname = prow["name"]
-        brand_price = calc_brand_price(site_price, pname, dur)
-        cur.execute(
-            "INSERT INTO plans (product_id, duration, price, stock, bonus)"
-            " VALUES (?, ?, ?, 20, ?)",
-            (pid, dur, brand_price, bonus),
-        )
-        added_items.append(
-            f"• {pname} — {dur} | ৳{brand_price:.0f}{format_bonus_bracket(bonus)}"
-        )
-
-      conn.commit()
-      conn.close()
-      await safe_delete_message(uid, message.message_id)
-      if added_items:
-        done = await message.answer(
-            f"✅ {len(added_items)}টি প্ল্যান যোগ হয়েছে:\n"
-            + "\n".join(added_items)
-        )
-        await asyncio.sleep(4)
-        await safe_delete_message(uid, done.message_id)
-      return
-
-    elif step == "del_plan_loop":
-      try:
-        plid = int(txt)
-      except ValueError:
-        return
-
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute(
-          """
-                SELECT pl.duration, pl.price, p.name
-                FROM plans pl
-                JOIN products p ON pl.product_id = p.id
-                WHERE pl.id = ?
-                """,
-          (plid,),
-      )
-      prow = cur.fetchone()
-      if not prow:
-        conn.close()
-        return
-
-      cur.execute("DELETE FROM plans WHERE id = ?", (plid,))
-      conn.commit()
-      conn.close()
-      await safe_delete_message(uid, message.message_id)
-      done = await message.answer(
-          f"🗑 Plan #{plid} ({prow['name']} - {prow['duration']}) রিমুভ"
-          f" হয়েছে।"
-      )
-      await asyncio.sleep(3)
-      await safe_delete_message(uid, done.message_id)
-      return
-
-    elif step == "edit_plan":
-      parts = [x.strip() for x in txt.split("|")]
-      if len(parts) < 2:
-        return
-      try:
-        plid = int(parts[0])
-        new_stock = int(parts[2]) if len(parts) >= 3 and parts[2] else None
-        raw_p = float(parts[1])
-        if raw_p <= 0 or (new_stock is not None and new_stock < 0):
-          raise ValueError()
-      except ValueError:
-        return
-
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute(
-          """
-                SELECT pl.id, pl.duration, pl.price, p.name
-                FROM plans pl
-                JOIN products p ON pl.product_id = p.id
-                WHERE pl.id = ?
-                """,
-          (plid,),
-      )
-      prow = cur.fetchone()
-      if not prow:
-        conn.close()
-        return
-
-      new_price = (
-          round_to_0_or_5(raw_p)
-          if is_dolphin_product(prow["name"])
-          else round_to_zero(raw_p)
-      )
-      if new_stock is not None:
-        cur.execute(
-            "UPDATE plans SET price = ?, stock = ? WHERE id = ?",
-            (new_price, new_stock, plid),
-        )
-      else:
-        cur.execute(
-            "UPDATE plans SET price = ? WHERE id = ?",
-            (new_price, plid),
-        )
-      conn.commit()
-      conn.close()
-      admin_states.pop(uid, None)
-      await safe_delete_messages(uid, [message.message_id, prompt_id])
-      done = await message.answer(
-          f"✅ Plan #{plid} আপডেট হয়েছে: ৳{new_price:.0f}"
-      )
-      await asyncio.sleep(3)
-      await safe_delete_message(uid, done.message_id)
-      return
-
-    elif step == "set_offer":
-      if "|" not in txt:
-        return
-      pl_str, offer_txt = [x.strip() for x in txt.split("|", 1)]
-      try:
-        plid = int(pl_str)
-      except ValueError:
-        return
-      final_offer = "" if offer_txt == "-" else offer_txt
-      conn = get_conn()
-      cur = conn.cursor()
-      cur.execute("UPDATE plans SET bonus = ? WHERE id = ?", (final_offer, plid))
-      updated = cur.rowcount
-      conn.commit()
-      conn.close()
-      admin_states.pop(uid, None)
-      await safe_delete_messages(uid, [message.message_id, prompt_id])
-      if updated:
-        done = await message.answer(
-            f"✅ Plan #{plid} অফার আপডেট হয়েছে: {final_offer or 'Removed'}"
-        )
-        await asyncio.sleep(3)
-        await safe_delete_message(uid, done.message_id)
-      return
-
   if uid in user_states:
     ustate = user_states[uid]
     _, _, lang, _, _, _ = get_user_info(uid)
@@ -3517,7 +3776,7 @@ async def handle_messages(message: Message):
 
     if step == "wait_proof":
       has_photo = bool(message.photo)
-      valid_txt, cleaned_proof = is_valid_trx_or_proof_text(txt)
+      valid_txt, cleaned_proof, is_mobile = is_valid_trx_or_proof_text(txt)
       order_msg_id = ustate.get("order_msg_id")
 
       if not has_photo and not valid_txt:
@@ -3541,7 +3800,7 @@ async def handle_messages(message: Message):
         await safe_delete_message(uid, warn.message_id)
         return
 
-      if valid_txt and is_duplicate_proof(cleaned_proof):
+      if valid_txt and is_duplicate_proof(cleaned_proof, is_mobile=is_mobile):
         oid = ustate["order_id"]
         conn = get_conn()
         cur = conn.cursor()
@@ -3551,9 +3810,9 @@ async def handle_messages(message: Message):
         user_states.pop(uid, None)
         await safe_delete_messages(uid, [message.message_id, order_msg_id])
         warn = await message.answer(
-            f"❌ <b>ডুপ্লিকেট প্রুফ!</b> অর্ডার #{oid} বাতিল করা হয়েছে।"
+            f"❌ <b>ডুপ্লিকেট TrxID!</b> অর্ডার #{oid} বাতিল করা হয়েছে।"
             if lang == "bn"
-            else f"❌ <b>Duplicate proof!</b> Order #{oid} cancelled.",
+            else f"❌ <b>Duplicate TrxID!</b> Order #{oid} cancelled.",
             parse_mode="HTML",
         )
         await asyncio.sleep(4)
@@ -3569,17 +3828,18 @@ async def handle_messages(message: Message):
       created = ustate.get("created_at", now_str())
 
       photo_id = message.photo[-1].file_id if has_photo else ""
-      proof_text = cleaned_proof if valid_txt else ""
+      sender_num_val = cleaned_proof if (valid_txt and is_mobile) else ""
+      trx_val = cleaned_proof if (valid_txt and not is_mobile) else ""
 
       conn = get_conn()
       cur = conn.cursor()
       cur.execute(
           """
                 UPDATE orders
-                SET trx_id = ?, proof_photo_id = ?, status = 'pending'
+                SET sender_number = ?, trx_id = ?, proof_photo_id = ?, status = 'pending'
                 WHERE id = ? AND user_id = ?
                 """,
-          (proof_text, photo_id, oid, uid),
+          (sender_num_val, trx_val, photo_id, oid, uid),
       )
       conn.commit()
       conn.close()
@@ -3602,7 +3862,8 @@ async def handle_messages(message: Message):
           if disc_pct > 0
           else ""
       )
-      info_line = f"\n🧾 Info: {proof_text}" if proof_text else ""
+      shown_proof = sender_num_val or trx_val
+      info_line = f"\n🧾 Info: {shown_proof}" if shown_proof else ""
       photo_line = "\n📸 Proof: Screenshot attached" if photo_id else ""
 
       admin_alert = (
