@@ -102,6 +102,29 @@ def format_unit_duration(num_val: int, unit_type: str) -> str:
   return f"{n} DAY" if n == 1 else f"{n} DAYS"
 
 
+def parse_multi_int_values(raw_text: str) -> list[int]:
+  items = re.findall(r"\d+", raw_text or "")
+  result: list[int] = []
+  for tok in items:
+    val = int(tok)
+    if val > 0:
+      result.append(val)
+  return result
+
+
+def parse_multi_price_values(raw_text: str) -> list[float]:
+  items = re.findall(r"\d+(?:\.\d+)?", raw_text or "")
+  result: list[float] = []
+  for tok in items:
+    try:
+      val = float(tok)
+      if val > 0:
+        result.append(val)
+    except ValueError:
+      pass
+  return result
+
+
 def parse_clean_price(raw_val: str) -> float:
   s = re.sub(r"[^\d.]", "", (raw_val or "").strip())
   if not s:
@@ -369,53 +392,82 @@ async def safe_delete_messages(chat_id: int, message_ids: list[int | None]):
     await safe_delete_message(chat_id, mid)
 
 
+def detect_payment_method_label(
+    sender_number: str = "", trx_id: str = "", proof_photo_id: str = ""
+) -> str:
+  num = normalize_bd_mobile(sender_number or "") or (sender_number or "").strip()
+  trx = (trx_id or "").strip().upper()
+  has_photo = bool((proof_photo_id or "").strip())
+
+  if trx:
+    if trx.startswith("BK") or "BKASH" in trx:
+      return f"বিকাশ (TrxID: {trx})"
+    if trx.startswith("NG") or "NAGAD" in trx:
+      return f"নগদ (TrxID: {trx})"
+    return f"TrxID ({trx})"
+
+  if num:
+    if re.fullmatch(r"01[3-9]\d{8}", num):
+      prefix3 = num[:3]
+      if prefix3 in ("017", "013"):
+        return f"বিকাশ / নগদ নম্বর ({num})"
+      if prefix3 in ("018", "019", "016", "014", "015"):
+        return f"মোবাইল নম্বর ({num})"
+    return f"মোবাইল নম্বর ({num})"
+
+  if has_photo:
+    return "স্ক্রিনশট (বিকাশ / নগদ)"
+  return "উল্লেখ নেই"
+
+
 # ==========================================
-# BACKUP & RESTORE ENGINE
+# HIGH-RELIABILITY BACKUP & RESTORE ENGINE
 # ==========================================
 def export_full_backup_payload() -> dict:
   conn = get_conn()
-  cur = conn.cursor()
+  try:
+    cur = conn.cursor()
 
-  cur.execute("SELECT * FROM users ORDER BY user_id")
-  users = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT * FROM users ORDER BY user_id")
+    users = [dict(r) for r in cur.fetchall()]
 
-  cur.execute("SELECT * FROM products ORDER BY id")
-  products = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT * FROM products ORDER BY id")
+    products = [dict(r) for r in cur.fetchall()]
 
-  cur.execute("SELECT * FROM plans ORDER BY id")
-  plans = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT * FROM plans ORDER BY id")
+    plans = [dict(r) for r in cur.fetchall()]
 
-  cur.execute("SELECT * FROM orders ORDER BY id")
-  orders = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT * FROM orders ORDER BY id")
+    orders = [dict(r) for r in cur.fetchall()]
 
-  cur.execute("SELECT * FROM payment_settings WHERE id = 1")
-  pay_row = cur.fetchone()
-  payment_settings = [dict(pay_row)] if pay_row else []
+    cur.execute("SELECT * FROM payment_settings WHERE id = 1")
+    pay_row = cur.fetchone()
+    payment_settings = [dict(pay_row)] if pay_row else []
 
-  cur.execute("SELECT * FROM key_ownership ORDER BY id")
-  key_ownership = [dict(r) for r in cur.fetchall()]
+    cur.execute("SELECT * FROM key_ownership ORDER BY id")
+    key_ownership = [dict(r) for r in cur.fetchall()]
 
-  conn.close()
-
-  return {
-      "version": "zoro404_backup_v2",
-      "exported_at": now_str(),
-      "counts": {
-          "users": len(users),
-          "products": len(products),
-          "plans": len(plans),
-          "orders": len(orders),
-          "key_ownership": len(key_ownership),
-      },
-      "tables": {
-          "users": users,
-          "products": products,
-          "plans": plans,
-          "orders": orders,
-          "payment_settings": payment_settings,
-          "key_ownership": key_ownership,
-      },
-  }
+    return {
+        "version": "zoro404_backup_v3_pro",
+        "exported_at": now_str(),
+        "counts": {
+            "users": len(users),
+            "products": len(products),
+            "plans": len(plans),
+            "orders": len(orders),
+            "key_ownership": len(key_ownership),
+        },
+        "tables": {
+            "users": users,
+            "products": products,
+            "plans": plans,
+            "orders": orders,
+            "payment_settings": payment_settings,
+            "key_ownership": key_ownership,
+        },
+    }
+  finally:
+    conn.close()
 
 
 def import_full_backup_payload(payload: dict) -> dict[str, int]:
@@ -436,203 +488,257 @@ def import_full_backup_payload(payload: dict) -> dict[str, int]:
       "key_ownership": 0,
   }
 
-  for p in tables.get("products", []):
-    pname = (p.get("name") or "").strip()
-    if not pname:
-      continue
-    cat = p.get("category") or "ALL"
-    if p.get("id") is not None:
-      cur.execute(
-          """
-                INSERT INTO products (id, name, category)
-                VALUES (?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    name = excluded.name,
-                    category = excluded.category
-                """,
-          (int(p["id"]), pname, cat),
-      )
-    else:
-      cur.execute(
-          "INSERT INTO products (name, category) VALUES (?, ?)",
-          (pname, cat),
-      )
-    restored["products"] += 1
+  try:
+    cur.execute("BEGIN IMMEDIATE")
 
-  for pl in tables.get("plans", []):
-    pid = pl.get("product_id")
-    dur = canon_duration(pl.get("duration") or "")
-    if not pid or not dur:
-      continue
-    cur.execute("SELECT id FROM products WHERE id = ?", (int(pid),))
-    if not cur.fetchone():
-      continue
-    price = float(pl.get("price") or 0.0)
-    stock = int(pl.get("stock") or 0)
-    bonus = pl.get("bonus") or ""
-    if pl.get("id") is not None:
-      cur.execute(
-          """
-                INSERT INTO plans (id, product_id, duration, price, stock, bonus)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    product_id = excluded.product_id,
-                    duration = excluded.duration,
-                    price = excluded.price,
-                    stock = excluded.stock,
-                    bonus = excluded.bonus
-                """,
-          (int(pl["id"]), int(pid), dur, price, stock, bonus),
-      )
-    else:
-      cur.execute(
-          """
-                INSERT INTO plans (product_id, duration, price, stock, bonus)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-          (int(pid), dur, price, stock, bonus),
-      )
-    restored["plans"] += 1
+    prod_id_map: dict[int, int] = {}
+    for p in tables.get("products", []):
+      pname = (p.get("name") or "").strip()
+      if not pname:
+        continue
+      cat = (p.get("category") or "ALL").strip().upper()
+      old_pid = p.get("id")
+      if old_pid is not None:
+        cur.execute(
+            """
+                    INSERT INTO products (id, name, category)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        name = excluded.name,
+                        category = excluded.category
+                    """,
+            (int(old_pid), pname, cat),
+        )
+        prod_id_map[int(old_pid)] = int(old_pid)
+      else:
+        cur.execute(
+            "INSERT INTO products (name, category) VALUES (?, ?)",
+            (pname, cat),
+        )
+      restored["products"] += 1
 
-  for u in tables.get("users", []):
-    if u.get("user_id") is None:
-      continue
-    uid = int(u["user_id"])
-    cur.execute(
-        """
-            INSERT INTO users (
-                user_id, full_name, username, lang, balance,
-                total_spent, discount_pct, referral_count, referred_by, joined_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                full_name = excluded.full_name,
-                username = excluded.username,
-                lang = excluded.lang,
-                balance = MAX(users.balance, excluded.balance),
-                total_spent = MAX(users.total_spent, excluded.total_spent),
-                discount_pct = MAX(users.discount_pct, excluded.discount_pct),
-                referral_count = MAX(users.referral_count, excluded.referral_count),
-                referred_by = CASE
-                    WHEN users.referred_by = 0 THEN excluded.referred_by
-                    ELSE users.referred_by
-                END,
-                joined_at = COALESCE(NULLIF(users.joined_at, ''), excluded.joined_at)
-            """,
-        (
-            uid,
-            u.get("full_name") or "User",
-            u.get("username") or "N/A",
-            u.get("lang") or "bn",
-            float(u.get("balance") or 0.0),
-            float(u.get("total_spent") or 0.0),
-            float(u.get("discount_pct") or 0.0),
-            int(u.get("referral_count") or 0),
-            int(u.get("referred_by") or 0),
-            u.get("joined_at") or now_str(),
-        ),
-    )
-    restored["users"] += 1
+    plan_id_map: dict[int, int] = {}
+    for pl in tables.get("plans", []):
+      raw_pid = pl.get("product_id")
+      dur = canon_duration(pl.get("duration") or "")
+      if raw_pid is None or not dur:
+        continue
+      mapped_pid = prod_id_map.get(int(raw_pid), int(raw_pid))
+      cur.execute("SELECT id FROM products WHERE id = ?", (mapped_pid,))
+      if not cur.fetchone():
+        continue
 
-  for o in tables.get("orders", []):
-    if o.get("user_id") is None or o.get("plan_id") is None:
-      continue
-    cur.execute("SELECT id FROM plans WHERE id = ?", (int(o["plan_id"]),))
-    if not cur.fetchone():
-      continue
-    if o.get("id") is not None:
+      price = float(pl.get("price") or 0.0)
+      stock = int(pl.get("stock") or 0)
+      bonus = pl.get("bonus") or ""
+      old_plid = pl.get("id")
+
+      if old_plid is not None:
+        cur.execute(
+            """
+                    INSERT INTO plans (id, product_id, duration, price, stock, bonus)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        product_id = excluded.product_id,
+                        duration = excluded.duration,
+                        price = excluded.price,
+                        stock = excluded.stock,
+                        bonus = excluded.bonus
+                    """,
+            (int(old_plid), mapped_pid, dur, price, stock, bonus),
+        )
+        plan_id_map[int(old_plid)] = int(old_plid)
+      else:
+        cur.execute(
+            """
+                    INSERT INTO plans (product_id, duration, price, stock, bonus)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+            (mapped_pid, dur, price, stock, bonus),
+        )
+        plan_id_map[int(cur.lastrowid)] = int(cur.lastrowid)
+      restored["plans"] += 1
+
+    for u in tables.get("users", []):
+      if u.get("user_id") is None:
+        continue
+      uid = int(u["user_id"])
       cur.execute(
           """
-                INSERT INTO orders (
-                    id, user_id, plan_id, sender_number, trx_id, proof_photo_id,
-                    delivered_key, discount_used_pct, final_amount, status, created_at
+                INSERT INTO users (
+                    user_id, full_name, username, lang, balance,
+                    total_spent, discount_pct, referral_count, referred_by, joined_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    sender_number = COALESCE(NULLIF(excluded.sender_number, ''), orders.sender_number),
-                    trx_id = COALESCE(NULLIF(excluded.trx_id, ''), orders.trx_id),
-                    proof_photo_id = COALESCE(NULLIF(excluded.proof_photo_id, ''), orders.proof_photo_id),
-                    delivered_key = COALESCE(NULLIF(excluded.delivered_key, ''), orders.delivered_key),
-                    discount_used_pct = excluded.discount_used_pct,
-                    final_amount = excluded.final_amount,
-                    status = CASE
-                        WHEN orders.status = 'approved' THEN 'approved'
-                        ELSE excluded.status
-                    END
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    full_name = COALESCE(NULLIF(excluded.full_name, ''), users.full_name),
+                    username = COALESCE(NULLIF(excluded.username, ''), users.username),
+                    lang = COALESCE(NULLIF(excluded.lang, ''), users.lang),
+                    balance = MAX(users.balance, excluded.balance),
+                    total_spent = MAX(users.total_spent, excluded.total_spent),
+                    discount_pct = MAX(users.discount_pct, excluded.discount_pct),
+                    referral_count = MAX(users.referral_count, excluded.referral_count),
+                    referred_by = CASE
+                        WHEN users.referred_by = 0 THEN excluded.referred_by
+                        ELSE users.referred_by
+                    END,
+                    joined_at = COALESCE(NULLIF(users.joined_at, ''), excluded.joined_at)
                 """,
           (
-              int(o["id"]),
-              int(o["user_id"]),
-              int(o["plan_id"]),
-              o.get("sender_number") or "",
-              o.get("trx_id") or "",
-              o.get("proof_photo_id") or "",
-              o.get("delivered_key") or "",
-              float(o.get("discount_used_pct") or 0.0),
-              float(o.get("final_amount") or 0.0),
-              o.get("status") or "pending_payment",
-              o.get("created_at") or now_str(),
+              uid,
+              u.get("full_name") or "User",
+              u.get("username") or "N/A",
+              u.get("lang") or "bn",
+              float(u.get("balance") or 0.0),
+              float(u.get("total_spent") or 0.0),
+              float(u.get("discount_pct") or 0.0),
+              int(u.get("referral_count") or 0),
+              int(u.get("referred_by") or 0),
+              u.get("joined_at") or now_str(),
           ),
       )
-    restored["orders"] += 1
+      restored["users"] += 1
 
-  for ps in tables.get("payment_settings", []):
-    bk = ps.get("bkash") or DEFAULT_BKASH
-    ng = ps.get("nagad") or DEFAULT_NAGAD
-    cur.execute(
-        """
-            INSERT INTO payment_settings (id, bkash, nagad)
-            VALUES (1, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                bkash = excluded.bkash,
-                nagad = excluded.nagad
-            """,
-        (bk, ng),
-    )
+    for o in tables.get("orders", []):
+      if o.get("user_id") is None or o.get("plan_id") is None:
+        continue
+      mapped_plid = plan_id_map.get(int(o["plan_id"]), int(o["plan_id"]))
+      cur.execute("SELECT id FROM plans WHERE id = ?", (mapped_plid,))
+      if not cur.fetchone():
+        continue
 
-  for ko in tables.get("key_ownership", []):
-    kval = (ko.get("key_value") or "").strip()
-    if not kval:
-      continue
-    cur.execute(
-        """
-            INSERT INTO key_ownership (key_value, owner_user_id, product_name, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(key_value) DO UPDATE SET
-                owner_user_id = CASE
-                    WHEN key_ownership.owner_user_id = 0 THEN excluded.owner_user_id
-                    ELSE key_ownership.owner_user_id
-                END,
-                product_name = excluded.product_name
-            """,
-        (
-            kval,
-            int(ko.get("owner_user_id") or 0),
-            ko.get("product_name") or "DOLPHIN",
-            ko.get("created_at") or now_str(),
-        ),
-    )
-    restored["key_ownership"] += 1
-
-  cur.execute("""
-        UPDATE users
-        SET total_spent = MAX(
-            COALESCE(total_spent, 0.0),
-            COALESCE((
-                SELECT SUM(COALESCE(NULLIF(o.final_amount, 0), pl.price))
-                FROM orders o
-                JOIN plans pl ON o.plan_id = pl.id
-                WHERE o.user_id = users.user_id AND o.status = 'approved'
-            ), 0.0)
+      old_oid = o.get("id")
+      if old_oid is not None:
+        cur.execute(
+            """
+                    INSERT INTO orders (
+                        id, user_id, plan_id, sender_number, trx_id, proof_photo_id,
+                        delivered_key, discount_used_pct, final_amount, status, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        sender_number = COALESCE(NULLIF(excluded.sender_number, ''), orders.sender_number),
+                        trx_id = COALESCE(NULLIF(excluded.trx_id, ''), orders.trx_id),
+                        proof_photo_id = COALESCE(NULLIF(excluded.proof_photo_id, ''), orders.proof_photo_id),
+                        delivered_key = COALESCE(NULLIF(excluded.delivered_key, ''), orders.delivered_key),
+                        discount_used_pct = excluded.discount_used_pct,
+                        final_amount = CASE
+                            WHEN excluded.final_amount > 0 THEN excluded.final_amount
+                            ELSE orders.final_amount
+                        END,
+                        status = CASE
+                            WHEN orders.status = 'approved' THEN 'approved'
+                            ELSE excluded.status
+                        END
+                    """,
+            (
+                int(old_oid),
+                int(o["user_id"]),
+                mapped_plid,
+                o.get("sender_number") or "",
+                o.get("trx_id") or "",
+                o.get("proof_photo_id") or "",
+                o.get("delivered_key") or "",
+                float(o.get("discount_used_pct") or 0.0),
+                float(o.get("final_amount") or 0.0),
+                o.get("status") or "pending_payment",
+                o.get("created_at") or now_str(),
+            ),
         )
-        """)
+      else:
+        cur.execute(
+            """
+                    INSERT INTO orders (
+                        user_id, plan_id, sender_number, trx_id, proof_photo_id,
+                        delivered_key, discount_used_pct, final_amount, status, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+            (
+                int(o["user_id"]),
+                mapped_plid,
+                o.get("sender_number") or "",
+                o.get("trx_id") or "",
+                o.get("proof_photo_id") or "",
+                o.get("delivered_key") or "",
+                float(o.get("discount_used_pct") or 0.0),
+                float(o.get("final_amount") or 0.0),
+                o.get("status") or "pending_payment",
+                o.get("created_at") or now_str(),
+            ),
+        )
+      restored["orders"] += 1
 
-  conn.commit()
-  conn.close()
-  return restored
+    for ps in tables.get("payment_settings", []):
+      bk = (ps.get("bkash") or DEFAULT_BKASH).strip()
+      ng = (ps.get("nagad") or DEFAULT_NAGAD).strip()
+      cur.execute(
+          """
+                INSERT INTO payment_settings (id, bkash, nagad)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    bkash = excluded.bkash,
+                    nagad = excluded.nagad
+                """,
+          (bk, ng),
+      )
+
+    for ko in tables.get("key_ownership", []):
+      kval = (ko.get("key_value") or "").strip()
+      if not kval:
+        continue
+      cur.execute(
+          """
+                INSERT INTO key_ownership (key_value, owner_user_id, product_name, created_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(key_value) DO UPDATE SET
+                    owner_user_id = CASE
+                        WHEN key_ownership.owner_user_id = 0 THEN excluded.owner_user_id
+                        ELSE key_ownership.owner_user_id
+                    END,
+                    product_name = excluded.product_name
+                """,
+          (
+              kval,
+              int(ko.get("owner_user_id") or 0),
+              ko.get("product_name") or "DOLPHIN",
+              ko.get("created_at") or now_str(),
+          ),
+      )
+      restored["key_ownership"] += 1
+
+    cur.execute("""
+            UPDATE users
+            SET total_spent = MAX(
+                COALESCE(total_spent, 0.0),
+                COALESCE((
+                    SELECT SUM(COALESCE(NULLIF(o.final_amount, 0), pl.price))
+                    FROM orders o
+                    JOIN plans pl ON o.plan_id = pl.id
+                    WHERE o.user_id = users.user_id AND o.status = 'approved'
+                ), 0.0)
+            )
+            """)
+
+    conn.commit()
+    try:
+      conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+    except Exception:
+      pass
+    return restored
+  except Exception:
+    try:
+      conn.rollback()
+    except Exception:
+      pass
+    raise
+  finally:
+    conn.close()
 
 
-async def send_backup_file_to_admin(chat_id: int):
+async def send_backup_file_to_admin(
+    chat_id: int, title_prefix: str = "DATABASE BACKUP READY!"
+):
   payload = export_full_backup_payload()
   raw_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode(
       "utf-8"
@@ -642,7 +748,7 @@ async def send_backup_file_to_admin(chat_id: int):
   counts = payload["counts"]
 
   caption = (
-      f"💾 <b>DATABASE BACKUP READY!</b>\n"
+      f"💾 <b>{html.escape(title_prefix)}</b>\n"
       f"🕒 TIME: <code>{html.escape(payload['exported_at'])}</code>\n"
       f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
       f"• 👥 <b>USERS:</b> <b>{counts['users']}</b>\n"
@@ -650,7 +756,7 @@ async def send_backup_file_to_admin(chat_id: int):
       f"• ⏱ <b>PLANS:</b> <b>{counts['plans']}</b>\n"
       f"• 🧾 <b>ORDERS:</b> <b>{counts['orders']}</b>\n"
       f"• 🔐 <b>KEY LOCKS:</b> <b>{counts['key_ownership']}</b>\n\n"
-      f"<b>আপডেটের পর ডেটা ফেরাতে /restore দিয়ে এই ফাইলটি পাঠান।</b>"
+      f"<b>রিস্টোর করতে /restore বা Restore DB দিয়ে এই ফাইলটি পাঠান।</b>"
   )
   doc = BufferedInputFile(raw_bytes, filename=filename)
   await bot.send_document(
@@ -659,34 +765,6 @@ async def send_backup_file_to_admin(chat_id: int):
       caption=caption,
       parse_mode="HTML",
   )
-
-
-async def broadcast_post_restore_notice() -> tuple[int, int]:
-  conn = get_conn()
-  cur = conn.cursor()
-  cur.execute("SELECT user_id FROM users")
-  all_user_ids = [int(r["user_id"]) for r in cur.fetchall()]
-  conn.close()
-
-  notice_text = (
-      "<b>BOT UPDATE DONE ✅</b>\n"
-      "<b>YOU CAN BUY THE PRODUCT YOU LIKE.</b>"
-  )
-  sent = 0
-  for target_uid in all_user_ids:
-    try:
-      await bot.send_message(
-          chat_id=target_uid,
-          text=notice_text,
-          parse_mode="HTML",
-          link_preview_options=NO_PREVIEW,
-          reply_markup=update_channel_kb(),
-      )
-      sent += 1
-      await asyncio.sleep(0.03)
-    except Exception:
-      pass
-  return sent, len(all_user_ids)
 
 
 # ==========================================
@@ -1494,6 +1572,7 @@ def get_user_info(user_id: int):
 
 def build_welcome_message(full_name: str, lang: str) -> str:
   safe_name = html.escape(full_name)
+  safe_sup = f"<code>{html.escape(SUPPORT_HANDLE)}</code>"
   ch_link = f'<a href="{html.escape(CHANNEL_URL)}">CLICK HERE</a>'
   if lang == "bn":
     return (
@@ -1501,7 +1580,7 @@ def build_welcome_message(full_name: str, lang: str) -> str:
         f"✨ <b>ZORO 404 OFFICIAL</b> বটে আপনাকে স্বাগতম।\n\n"
         f"এখান থেকে সহজে আপনার পছন্দের প্ল্যান বেছে নিয়ে অর্ডার করতে পারবেন।\n"
         f"📢 আপডেট চ্যানেল: {ch_link}\n"
-        f"💬 সাপোর্ট: <b>{html.escape(SUPPORT_HANDLE)}</b>\n\n"
+        f"💬 সাপোর্ট: {safe_sup}\n\n"
         f"🛒 শুরু করতে নিচের <b>পাসওয়ার্ড কিনুন</b> বাটনে চাপুন।"
     )
   return (
@@ -1509,7 +1588,7 @@ def build_welcome_message(full_name: str, lang: str) -> str:
       f"✨ Welcome to <b>ZORO 404 OFFICIAL</b>.\n\n"
       f"Choose your plan easily to place an order.\n"
       f"📢 Update Channel: {ch_link}\n"
-      f"💬 Support: <b>{html.escape(SUPPORT_HANDLE)}</b>\n\n"
+      f"💬 Support: {safe_sup}\n\n"
       f"🛒 Tap <b>Buy Keys</b> below to get started."
   )
 
@@ -1908,20 +1987,23 @@ async def send_support_message(message: Message):
 
   _, _, lang, _, _, _ = get_user_info(uid)
   ch_link = f'<a href="{html.escape(CHANNEL_URL)}">CLICK HERE</a>'
+  safe_sup = f"<code>{html.escape(SUPPORT_HANDLE)}</code>"
+  safe_wa = f"<code>{html.escape(WHATSAPP_NUMBER)}</code>"
+
   if lang == "bn":
     msg = (
         f"📞 <b>সাপোর্ট ও যোগাযোগ</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🔹 <b>টেলিগ্রাম সাপোর্ট:</b> <b>{html.escape(SUPPORT_HANDLE)}</b>\n"
-        f"🔹 <b>হোয়াটসঅ্যাপ:</b> <b>{html.escape(WHATSAPP_NUMBER)}</b>\n"
+        f"🔹 <b>টেলিগ্রাম সাপোর্ট:</b> {safe_sup}\n"
+        f"🔹 <b>হোয়াটসঅ্যাপ:</b> {safe_wa}\n"
         f"🔹 <b>আপডেট চ্যানেল:</b> {ch_link}"
     )
   else:
     msg = (
         f"📞 <b>SUPPORT & CONTACT</b>\n"
         f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"🔹 <b>Telegram Support:</b> <b>{html.escape(SUPPORT_HANDLE)}</b>\n"
-        f"🔹 <b>WhatsApp:</b> <b>{html.escape(WHATSAPP_NUMBER)}</b>\n"
+        f"🔹 <b>Telegram Support:</b> {safe_sup}\n"
+        f"🔹 <b>WhatsApp:</b> {safe_wa}\n"
         f"🔹 <b>Update Channel:</b> {ch_link}"
     )
   await message.answer(
@@ -1951,8 +2033,8 @@ async def cmd_restore(message: Message):
   if message.from_user.id != ADMIN_ID:
     return
   prompt = await message.answer(
-      "♻️ <b>RESTORE DATABASE</b>\n"
-      "<b>আগে নেওয়া .json ব্যাকআপ ফাইলটি ডকুমেন্ট হিসেবে পাঠান:</b>",
+      "♻️ <b>PRO RESTORE DATABASE</b>\n"
+      "<b>রিস্টোর করার আগে অটো-ব্যাকআপ নেওয়া হবে। .json ফাইলটি পাঠান:</b>",
       parse_mode="HTML",
   )
   admin_states[ADMIN_ID] = {
@@ -2447,7 +2529,7 @@ async def cb_select_plan(callback: CallbackQuery):
         f"📦 <b>প্রোডাক্ট:</b> {html.escape(pname)}\n"
         f"⏱ <b>সময় / মেয়াদ:</b> {html.escape(duration)}{bonus_line}\n"
         f"💵 <b>মোট টাকা:</b> <b>৳{final_price:.0f}</b> (Send Money)\n\n"
-        f"📲 <b>পেমেন্ট নম্বর:</b>\n"
+        f"📲 <b>পেমেন্ট নম্বর (ক্লিক করে কপি করুন):</b>\n"
         f"• <b>বিকাশ:</b> <code>{html.escape(bkash_num)}</code>\n"
         f"• <b>নগদ:</b> <code>{html.escape(nagad_num)}</code>\n\n"
         f"টাকা পাঠানোর পর যেকোনো ১টি দিন:\n"
@@ -2462,7 +2544,7 @@ async def cb_select_plan(callback: CallbackQuery):
         f"📦 <b>PRODUCT:</b> {html.escape(pname)}\n"
         f"⏱ <b>DURATION:</b> {html.escape(duration)}{bonus_line}\n"
         f"💵 <b>TOTAL AMOUNT:</b> <b>৳{final_price:.0f}</b> (Send Money)\n\n"
-        f"📲 <b>PAYMENT NUMBERS:</b>\n"
+        f"📲 <b>PAYMENT NUMBERS (Tap to copy):</b>\n"
         f"• <b>bKash:</b> <code>{html.escape(bkash_num)}</code>\n"
         f"• <b>Nagad:</b> <code>{html.escape(nagad_num)}</code>\n\n"
         f"After sending money, send any ONE:\n"
@@ -2780,8 +2862,8 @@ async def cb_adm_restore(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
     return
   prompt = await callback.message.answer(
-      "♻️ <b>RESTORE DATABASE</b>\n"
-      "<b>আগে নেওয়া .json ব্যাকআপ ফাইলটি ডকুমেন্ট হিসেবে পাঠান:</b>",
+      "♻️ <b>PRO RESTORE DATABASE</b>\n"
+      "<b>রিস্টোর করার আগে অটো-ব্যাকআপ নেওয়া হবে। .json ফাইলটি পাঠান:</b>",
       parse_mode="HTML",
   )
   admin_states[ADMIN_ID] = {
@@ -3111,13 +3193,13 @@ async def cb_pick_duration_unit(callback: CallbackQuery):
     prompt_txt = (
         f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
         f"🕒 ইউনিট: <b>ঘণ্টা (HOURS)</b>\n"
-        f"✍️ <b>কত ঘণ্টা অ্যাড করতে চান? শুধু সংখ্যা লিখুন</b> (যেমন: <code>1</code>, <code>2</code>, <code>6</code>):"
+        f"✍️ <b>কত ঘণ্টা অ্যাড করতে চান? সংখ্যা লিখুন</b> (একটি বা একাধিক: <code>1 2 6</code>):"
     )
   else:
     prompt_txt = (
         f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
         f"📅 ইউনিট: <b>দিন (DAYS)</b>\n"
-        f"✍️ <b>কত দিন অ্যাড করতে চান? শুধু সংখ্যা লিখুন</b> (যেমন: <code>1</code>, <code>10</code>, <code>20</code>):"
+        f"✍️ <b>কত দিন অ্যাড করতে চান? সংখ্যা লিখুন</b> (একটি বা একাধিক: <code>1 10 20</code>):"
     )
   await callback.message.edit_text(prompt_txt, parse_mode="HTML")
   await callback.answer()
@@ -3371,22 +3453,31 @@ async def cb_adm_orders(callback: CallbackQuery):
         f"\n🧾 Info: {proof_val}" if proof_val else "\n📸 Proof: Screenshot"
     )
     paid_amt = float(r["final_amount"] or r["price"] or 0.0)
+    pay_method = detect_payment_method_label(
+        r["sender_number"], r["trx_id"], r["proof_photo_id"]
+    )
 
     caption_txt = (
-        f"🔑 [PASSWORD REQUEST] Order #{r['id']} | User: {r['user_id']}\n"
-        f"🕒 Time: {r['created_at']}\n"
-        f"📦 প্যানেল / প্রোডাক্ট: {r['name']} ({r['duration']}) -"
-        f" ৳{paid_amt:.0f}{offer_txt}{proof_line}"
+        f"📥 <b>NEW ORDER REQUEST #{r['id']}</b>\n"
+        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+        f"👤 <b>User ID:</b> <code>{r['user_id']}</code>\n"
+        f"📦 <b>Panel:</b> <b>{html.escape(r['name'])}</b> ({html.escape(r['duration'])})\n"
+        f"💰 <b>Amount:</b> <b>৳{paid_amt:.0f}</b>\n"
+        f"💳 <b>Method:</b> {html.escape(pay_method)}\n"
+        f"🕒 <b>Time:</b> <code>{html.escape(r['created_at'])}</code>"
+        f"{offer_txt}{proof_line}"
     )
     if r["proof_photo_id"]:
       await callback.message.answer_photo(
           photo=r["proof_photo_id"],
           caption=caption_txt,
+          parse_mode="HTML",
           reply_markup=order_approve_start_kb(r["id"]),
       )
     else:
       await callback.message.answer(
           caption_txt,
+          parse_mode="HTML",
           reply_markup=order_approve_start_kb(r["id"]),
       )
   await callback.answer()
@@ -3455,6 +3546,9 @@ async def handle_messages(message: Message):
         return
       buf = io.BytesIO()
       try:
+        await send_backup_file_to_admin(
+            uid, title_prefix="PRE-RESTORE SAFETY BACKUP"
+        )
         await bot.download(message.document, destination=buf)
         raw_text = buf.getvalue().decode("utf-8")
         data = json.loads(raw_text)
@@ -3462,28 +3556,20 @@ async def handle_messages(message: Message):
         admin_states.pop(uid, None)
         await safe_delete_messages(uid, [message.message_id, prompt_id])
 
-        status_msg = await message.answer(
-            "♻️ <b>DATABASE RESTORED! SENDING UPDATE NOTICE TO ALL USERS...</b>",
-            parse_mode="HTML",
-        )
-        sent_cnt, total_cnt = await broadcast_post_restore_notice()
-        await safe_delete_message(uid, status_msg.message_id)
-
         await message.answer(
-            f"✅ <b>FULL RESTORE & UPDATE NOTICE COMPLETED!</b>\n"
+            f"✅ <b>PRO RESTORE COMPLETED SUCCESSFULLY!</b>\n"
             f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
             f"• 👥 <b>USERS RESTORED:</b> <b>{restored['users']}</b>\n"
             f"• 📦 <b>PRODUCTS RESTORED:</b> <b>{restored['products']}</b>\n"
             f"• ⏱ <b>PLANS RESTORED:</b> <b>{restored['plans']}</b>\n"
             f"• 🧾 <b>ORDERS RESTORED:</b> <b>{restored['orders']}</b>\n"
-            f"• 🔐 <b>KEY LOCKS RESTORED:</b> <b>{restored['key_ownership']}</b>\n"
-            f"• 📢 <b>UPDATE NOTICE SENT:</b> <b>{sent_cnt}/{total_cnt}</b>",
+            f"• 🔐 <b>KEY LOCKS RESTORED:</b> <b>{restored['key_ownership']}</b>",
             parse_mode="HTML",
         )
       except Exception as exc:
         logger.warning("Restore failed: %s", exc)
         await message.answer(
-            "❌ <b>ব্যাকআপ ফাইলটি সঠিকভাবে পড়া যায়নি। বৈধ ব্যাকআপ .json ফাইল দিন।</b>",
+            "❌ <b>ব্যাকআপ ফাইলটি সঠিকভাবে রিস্টোর করা যায়নি। সেফটি ব্যাকআপ ও বর্তমান ডেটা অক্ষত আছে।</b>",
             parse_mode="HTML",
         )
       return
@@ -3507,56 +3593,84 @@ async def handle_messages(message: Message):
       return
 
     if step == "easy_plan_wait_num":
-      digits_only = re.sub(r"[^\d]", "", txt)
-      if not digits_only or int(digits_only) <= 0:
-        warn = await message.answer("❌ সঠিক সংখ্যা লিখুন (যেমন: 1, 6, 10, 20)")
+      vals = parse_multi_int_values(txt)
+      if not vals:
+        warn = await message.answer(
+            "❌ সঠিক সংখ্যা লিখুন (যেমন: 1 বা 1 2 6 বা 1, 10, 20)"
+        )
         await asyncio.sleep(2)
         await safe_delete_message(uid, warn.message_id)
         return
-      num_val = int(digits_only)
       unit_type = state.get("plan_unit") or "DAYS"
-      dur = format_unit_duration(num_val, unit_type)
+      durs = [format_unit_duration(v, unit_type) for v in vals]
       pid = state.get("plan_pid")
       pname = state.get("plan_pname") or ""
       admin_states[uid] = {
           "step": "easy_plan_wait_price",
           "plan_pid": pid,
           "plan_pname": pname,
-          "plan_dur": dur,
+          "plan_durs": durs,
           "prompt_msg_id": prompt_id,
       }
       await safe_delete_messages(uid, [message.message_id, prompt_id])
+      dur_preview = ", ".join(f"<code>{html.escape(d)}</code>" for d in durs)
+      if len(durs) == 1:
+        price_hint = (
+            f"💵 <b>{dur_preview}</b>-এর দাম কত? শুধু সংখ্যা লিখুন (যেমন:"
+            f" <code>300</code>):"
+        )
+      else:
+        price_hint = (
+            f"💵 <b>{len(durs)}টি</b> প্ল্যান ({dur_preview})-এর দাম একসাথে"
+            f" লিখুন (যেমন: <code>50 90 150</code>):"
+        )
       sent = await message.answer(
           f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
-          f"⏱ মেয়াদ: <b>{html.escape(dur)}</b>\n"
-          f"💵 <b>দাম কত? শুধু সংখ্যা লিখুন</b> (যেমন: <code>300</code>):",
+          f"⏱ মেয়াদসমূহ: {dur_preview}\n"
+          f"{price_hint}",
           parse_mode="HTML",
       )
       admin_states[uid]["prompt_msg_id"] = sent.message_id
       return
 
     if step == "easy_plan_wait_price":
-      raw_price = parse_clean_price(txt)
-      if raw_price <= 0:
-        warn = await message.answer("❌ সঠিক দাম লিখুন (যেমন: 300)")
+      durs = state.get("plan_durs") or ["1 DAY"]
+      raw_prices = parse_multi_price_values(txt)
+      if not raw_prices:
+        warn = await message.answer("❌ সঠিক দাম লিখুন (যেমন: 300 বা 50 90 150)")
         await asyncio.sleep(2)
         await safe_delete_message(uid, warn.message_id)
         return
+
+      if len(durs) > 1 and len(raw_prices) == 1:
+        raw_prices = raw_prices * len(durs)
+      elif len(durs) > 1 and len(raw_prices) != len(durs):
+        warn = await message.answer(
+            f"❌ মেয়াদ আছে {len(durs)}টি, তাই {len(durs)}টি দাম লিখুন (বা ১টি দাম"
+            " লিখলে সবগুলোতে সমান বসবে)।"
+        )
+        await asyncio.sleep(3)
+        await safe_delete_message(uid, warn.message_id)
+        return
+
       pid = state.get("plan_pid")
       pname = state.get("plan_pname") or ""
-      dur = state.get("plan_dur") or "1 DAY"
       admin_states[uid] = {
           "step": "easy_plan_wait_offer",
           "plan_pid": pid,
           "plan_pname": pname,
-          "plan_dur": dur,
-          "plan_raw_price": raw_price,
+          "plan_durs": durs,
+          "plan_raw_prices": raw_prices[: len(durs)],
           "prompt_msg_id": prompt_id,
       }
       await safe_delete_messages(uid, [message.message_id, prompt_id])
+      pairs_txt = "\n".join(
+          f"• <b>{html.escape(d)}</b> — ৳{p:.0f}"
+          for d, p in zip(durs, raw_prices[: len(durs)])
+      )
       sent = await message.answer(
           f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
-          f"⏱ মেয়াদ: <b>{html.escape(dur)}</b> | দাম: <b>৳{raw_price:.0f}</b>\n"
+          f"{pairs_txt}\n\n"
           f"🎁 কোনো অফার থাকলে লিখুন, না থাকলে <code>skip</code> বা <code>-</code> লিখুন:",
           parse_mode="HTML",
       )
@@ -3566,28 +3680,32 @@ async def handle_messages(message: Message):
     if step == "easy_plan_wait_offer":
       pid = state.get("plan_pid")
       pname = state.get("plan_pname") or ""
-      dur = state.get("plan_dur") or "1 DAY"
-      raw_price = float(state.get("plan_raw_price") or 0.0)
+      durs = state.get("plan_durs") or ["1 DAY"]
+      raw_prices = state.get("plan_raw_prices") or [0.0] * len(durs)
       bonus = "" if txt.lower() in ("-", "skip", "no", "none", "0") else txt
 
-      brand_price = calc_brand_price(raw_price, pname, dur)
+      added_summary = []
       conn = get_conn()
       cur = conn.cursor()
-      cur.execute(
-          "INSERT INTO plans (product_id, duration, price, stock, bonus)"
-          " VALUES (?, ?, ?, 20, ?)",
-          (pid, dur, brand_price, bonus),
-      )
+      for dur, raw_p in zip(durs, raw_prices):
+        brand_price = calc_brand_price(float(raw_p), pname, dur)
+        cur.execute(
+            "INSERT INTO plans (product_id, duration, price, stock, bonus)"
+            " VALUES (?, ?, ?, 20, ?)",
+            (pid, dur, brand_price, bonus),
+        )
+        added_summary.append(
+            f"• <b>{html.escape(dur)}</b> — <b>৳{brand_price:.0f}</b>{html.escape(format_bonus_bracket(bonus))}"
+        )
       conn.commit()
       conn.close()
 
       admin_states.pop(uid, None)
       await safe_delete_messages(uid, [message.message_id, prompt_id])
       await message.answer(
-          f"✅ প্ল্যান যোগ হয়েছে!\n"
-          f"• প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
-          f"• মেয়াদ: <b>{html.escape(dur)}</b>\n"
-          f"• দাম: <b>৳{brand_price:.0f}</b>{html.escape(format_bonus_bracket(bonus))}",
+          f"✅ <b>{len(added_summary)}টি প্ল্যান যোগ হয়েছে!</b>\n"
+          f"📦 প্রোডাক্ট: <b>{html.escape(pname)}</b>\n"
+          + "\n".join(added_summary),
           parse_mode="HTML",
           reply_markup=after_plan_added_kb(int(pid)),
       )
@@ -3683,33 +3801,80 @@ async def handle_messages(message: Message):
       urow = cur.fetchone()
       if not urow:
         conn.close()
+        await message.answer(
+            "❌ এই User ID-এর কোনো ইউজার পাওয়া যায়নি।", parse_mode="HTML"
+        )
         return
 
       cur.execute(
-          "SELECT COUNT(*) AS cnt FROM orders WHERE user_id = ? AND status ="
-          " 'approved'",
+          """
+                SELECT o.id, p.name AS pname, pl.duration, pl.price,
+                       o.final_amount, o.sender_number, o.trx_id,
+                       o.proof_photo_id, o.delivered_key, o.status, o.created_at
+                FROM orders o
+                JOIN plans pl ON o.plan_id = pl.id
+                JOIN products p ON pl.product_id = p.id
+                WHERE o.user_id = ?
+                ORDER BY o.id DESC
+                """,
           (target_uid,),
       )
-      app_o = cur.fetchone()["cnt"]
-      cur.execute(
-          "SELECT COUNT(*) AS cnt FROM orders WHERE user_id = ? AND status ="
-          " 'pending'",
-          (target_uid,),
-      )
-      pend_o = cur.fetchone()["cnt"]
+      all_ords = cur.fetchall()
       conn.close()
+
       admin_states.pop(uid, None)
       await safe_delete_messages(uid, [message.message_id, prompt_id])
 
-      sp = float(urow["total_spent"] or 0.0)
+      approved_ords = [o for o in all_ords if o["status"] == "approved"]
+      pending_ords = [o for o in all_ords if o["status"] == "pending"]
+      rejected_ords = [o for o in all_ords if o["status"] == "rejected"]
+
+      calc_spent = sum(
+          float(o["final_amount"] or o["price"] or 0.0) for o in approved_ords
+      )
+      sp = max(float(urow["total_spent"] or 0.0), calc_spent)
       vp = get_vip_discount_pct(sp)
+
+      order_cards = []
+      for o in all_ords[:10]:
+        amt = float(o["final_amount"] or o["price"] or 0.0)
+        method_lbl = detect_payment_method_label(
+            o["sender_number"], o["trx_id"], o["proof_photo_id"]
+        )
+        st_bn = status_label(o["status"], "bn")
+        key_line = (
+            f"\n     🔑 <b>Key:</b> <code>{html.escape(o['delivered_key'])}</code>"
+            if o["delivered_key"]
+            else ""
+        )
+        order_cards.append(
+            f"  • <b>#{o['id']}</b> | <b>{html.escape(o['pname'])}</b>"
+            f" ({html.escape(o['duration'])}) — <b>৳{amt:.0f}</b>"
+            f" [<b>{html.escape(st_bn)}</b>]\n"
+            f"     💳 <b>মাধ্যম:</b> {html.escape(method_lbl)}\n"
+            f"     🕒 <b>সময়:</b> <code>{html.escape(o['created_at'])}</code>{key_line}"
+        )
+
+      orders_section = (
+          "\n\n".join(order_cards)
+          if order_cards
+          else "  • কোনো অর্ডার হিস্ট্রি নেই।"
+      )
+
       await message.answer(
-          f"🔎 ইউজার তথ্য:\n"
-          f"• ID: {target_uid}\n"
-          f"• নাম: {urow['full_name']} ({urow['username']})\n"
-          f"• মোট কেনাকাটা: ৳{sp:.0f} | VIP ডিসকাউন্ট: {vp:.0f}%\n"
-          f"• জয়েন: {urow['joined_at']}\n"
-          f"• এপ্রুভড অর্ডার: {app_o} | পেন্ডিং অর্ডার: {pend_o}"
+          f"🔎 <b>ইউজার প্রোফাইল ও ক্রয় হিস্ট্রি</b>\n"
+          f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+          f"👤 <b>নাম:</b> <b>{html.escape(urow['full_name'])}</b>\n"
+          f"🔹 <b>ইউজারনেম:</b> <code>{html.escape(urow['username'])}</code>\n"
+          f"🆔 <b>User ID:</b> <code>{target_uid}</code>\n"
+          f"📅 <b>জয়েন:</b> <code>{html.escape(urow['joined_at'])}</code>\n"
+          f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+          f"🔑 <b>মোট কেনা পাসওয়ার্ড/অর্ডার:</b> <b>{len(approved_ords)} টি</b> (মোট রিকোয়েস্ট: {len(all_ords)} টি)\n"
+          f"💰 <b>মোট খরচ:</b> <b>৳{sp:.0f}</b> | 👑 <b>VIP:</b> {vp:.0f}%\n"
+          f"⏳ <b>পেন্ডিং:</b> {len(pending_ords)} | ❌ <b>রিজেক্টেড:</b> {len(rejected_ords)}\n"
+          f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+          f"🧾 <b>অর্ডার ডিটেইলস:</b>\n{orders_section}",
+          parse_mode="HTML",
       )
       return
 
@@ -3895,23 +4060,40 @@ async def handle_messages(message: Message):
       )
 
       full_name, username, _, total_spent, _, _ = get_user_info(uid)
-      offer_line = f"\n🎁 Offer: {bonus}" if bonus else ""
+      pay_method_lbl = detect_payment_method_label(
+          sender_num_val, trx_val, photo_id
+      )
+      offer_line = (
+          f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
+      )
       disc_line = (
-          f"\n👑 VIP Discount Applied: {disc_pct:.0f}% (Spent:"
+          f"\n👑 <b>VIP ডিসকাউন্ট:</b> {disc_pct:.0f}% (Spent:"
           f" ৳{total_spent:.0f})"
           if disc_pct > 0
           else ""
       )
       shown_proof = sender_num_val or trx_val
-      info_line = f"\n🧾 Info: {shown_proof}" if shown_proof else ""
-      photo_line = "\n📸 Proof: Screenshot attached" if photo_id else ""
+      info_line = (
+          f"\n🧾 <b>প্রুফ কোড/নম্বর:</b> <code>{html.escape(shown_proof)}</code>"
+          if shown_proof
+          else ""
+      )
+      photo_line = (
+          "\n📸 <b>স্ক্রিনশট:</b> যুক্ত করা হয়েছে" if photo_id else ""
+      )
 
       admin_alert = (
-          f"🔑 [PASSWORD REQUEST] Order #{oid}\n"
-          f"🕒 Time: {created}\n"
-          f"👤 User: {full_name} ({username}) | ID: {uid}\n"
-          f"📦 প্যানেল / প্রোডাক্ট: {pname} ({duration}) -"
-          f" ৳{final_price:.0f}{disc_line}{offer_line}{info_line}{photo_line}"
+          f"⚡ <b>নতুন অর্ডার রিকোয়েস্ট — #{oid}</b>\n"
+          f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+          f"👤 <b>কাস্টমার:</b> <b>{html.escape(full_name)}</b>"
+          f" (<code>{html.escape(username)}</code>)\n"
+          f"🆔 <b>User ID:</b> <code>{uid}</code>\n"
+          f"📦 <b>প্যানেল:</b> <b>{html.escape(pname)}</b>"
+          f" (<code>{html.escape(duration)}</code>)\n"
+          f"💵 <b>টাকার পরিমাণ:</b> <b>৳{final_price:.0f}</b>\n"
+          f"💳 <b>পেমেন্ট মাধ্যম:</b> <b>{html.escape(pay_method_lbl)}</b>\n"
+          f"🕒 <b>সময়:</b> <code>{html.escape(created)}</code>"
+          f"{disc_line}{offer_line}{info_line}{photo_line}"
       )
 
       try:
@@ -3920,12 +4102,14 @@ async def handle_messages(message: Message):
               ADMIN_ID,
               photo=photo_id,
               caption=admin_alert,
+              parse_mode="HTML",
               reply_markup=order_approve_start_kb(oid),
           )
         else:
           sent_adm = await bot.send_message(
               ADMIN_ID,
               admin_alert,
+              parse_mode="HTML",
               reply_markup=order_approve_start_kb(oid),
           )
         admin_states[ADMIN_ID] = {
