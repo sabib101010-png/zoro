@@ -55,31 +55,58 @@ NO_PREVIEW = LinkPreviewOptions(is_disabled=True)
 DEFAULT_BKASH = "01862849299"
 DEFAULT_NAGAD = "01778879676"
 
-DEFAULT_PLANS = []
-
-CATEGORIES = [
-    ("ALL", "🌐 ALL"),
-    ("ROOT", "🛡 ROOT"),
-    ("NON_ROOT", "🔓 NON ROOT"),
-    ("IOS", "📱 IOS"),
-    ("PC_LAPTOP", "💻 PC / LAPTOP"),
+# Saved future payment plan (Rocket & Upay disabled for now; Binance always in English)
+FUTURE_PAYMENT_PLAN = [
+    {"code": "bkash", "icon": "🅱️", "label_bn": "বিকাশ", "enabled": True},
+    {"code": "nagad", "icon": "🅽", "label_bn": "নগদ", "enabled": True},
+    {"code": "rocket", "icon": "🚀", "label_bn": "রকেট", "enabled": False},
+    {"code": "upay", "icon": "🟣", "label_bn": "উপায়", "enabled": False},
+    {"code": "binance", "icon": "🟡", "label_en": "Binance", "enabled": False},
 ]
 
-REMOVED_PRODUCTS = [
-    "Br Mod Apk Mod",
-    "ANGRY MOOD",
-    "DELTA MODZ",
-    "ANGRY MOD - ROOT",
-    "DELTA MOD - ROOT",
-    "ZYTRON PRO - ROOT",
-    "DRIP WIRE EXTERNAL",
-    "BR MOD NON ROOT",
-]
+CATALOG_PRODUCTS = []
+
+admin_states: dict[int, dict] = {}
+user_states: dict[int, dict] = {}
 
 
-def canon_name(name: str) -> str:
-  s = re.sub(r"\s+", " ", (name or "").strip()).upper()
-  return s
+def now_str() -> str:
+  return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_conn() -> sqlite3.Connection:
+  db_dir = os.path.dirname(os.path.abspath(DB_PATH))
+  if db_dir and not os.path.exists(db_dir):
+    os.makedirs(db_dir, exist_ok=True)
+  conn = sqlite3.connect(DB_PATH, timeout=30.0)
+  conn.row_factory = sqlite3.Row
+  conn.execute("PRAGMA journal_mode=WAL;")
+  conn.execute("PRAGMA synchronous=NORMAL;")
+  return conn
+
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+
+def update_channel_kb() -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(inline_keyboard=[[
+      InlineKeyboardButton(text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL),
+  ]])
+
+
+async def safe_delete_message(chat_id: int, message_id: int | None):
+  if not message_id:
+    return
+  try:
+    await bot.delete_message(chat_id=chat_id, message_id=message_id)
+  except Exception:
+    pass
+
+
+async def safe_delete_messages(chat_id: int, message_ids: list[int | None]):
+  for mid in message_ids:
+    await safe_delete_message(chat_id, mid)
 
 
 def canon_duration(dur: str) -> str:
@@ -206,8 +233,7 @@ def calc_brand_price(
     else:
       cut = 60.0
 
-  price = round_to_zero(max(10.0, sp - cut))
-  return price
+  return round_to_zero(max(10.0, sp - cut))
 
 
 def get_vip_discount_pct(total_spent: float) -> float:
@@ -246,173 +272,89 @@ def calc_discount_details(
     user_disc_pct: float = 0.0,
     total_spent: float = 0.0,
 ) -> tuple[float, float, float]:
+  _ = (duration, user_disc_pct)
   return calc_vip_price_details(pname, base_price, total_spent)
 
 
-RAW_CATALOG = [
-    (
-        "DOLPHIN PLUSH - ROOT",
-        "ROOT",
-        [
-            ("7 DAYS", 500.0, 15, "", True),
-            ("15 DAYS", 900.0, 10, "", True),
-            ("30 DAYS", 1500.0, 10, "", True),
-        ],
-    ),
-    (
-        "DELTA MODS - ROOT",
-        "ROOT",
-        [
-            ("1 DAY", 50.0, 25, "", False),
-            ("7 DAYS", 300.0, 20, "", False),
-            ("15 DAYS", 480.0, 15, "", False),
-            ("30 DAYS", 700.0, 10, "", False),
-        ],
-    ),
-    (
-        "BR MODS - ROOT",
-        "ROOT",
-        [
-            ("1 DAY", 40.0, 25, "", False),
-            ("10 DAYS", 380.0, 15, "", False),
-            ("30 DAYS", 680.0, 10, "", False),
-        ],
-    ),
-    (
-        "TITAN MODS - ROOT",
-        "ROOT",
-        [
-            ("1 DAY", 40.0, 25, "", False),
-            ("7 DAYS", 260.0, 20, "", False),
-            ("15 DAYS", 450.0, 15, "", False),
-            ("30 DAYS", 700.0, 10, "", False),
-        ],
-    ),
-    (
-        "DRIP WIRE - NON ROOT",
-        "NON_ROOT",
-        [
-            ("3 HOURS", 20.0, 30, "", False),
-            ("6 HOURS", 30.0, 30, "", False),
-            ("12 HOURS", 60.0, 25, "", False),
-            ("1 DAY", 80.0, 20, "", False),
-            ("7 DAYS", 350.0, 15, "", False),
-            ("30 DAYS", 700.0, 10, "", False),
-        ],
-    ),
-    (
-        "ANGRY MODS - ROOT",
-        "ROOT",
-        [
-            ("1 DAY", 50.0, 20, "", False),
-            ("7 DAYS", 200.0, 20, "", False),
-            ("15 DAYS", 480.0, 15, "", False),
-            ("30 DAYS", 740.0, 10, "", False),
-        ],
-    ),
-    (
-        "DRIP APKMOD - NON ROOT",
-        "NON_ROOT",
-        [
-            ("1 DAY", 50.0, 25, "", False),
-            ("3 DAYS", 80.0, 20, "", False),
-            ("7 DAYS", 170.0, 20, "", False),
-            ("15 DAYS", 290.0, 15, "", False),
-            ("30 DAYS", 500.0, 10, "", False),
-        ],
-    ),
-    (
-        "BR MOD PC",
-        "PC_LAPTOP",
-        [
-            ("1 DAY", 80.0, 20, "", False),
-            ("10 DAYS", 290.0, 15, "", False),
-            ("30 DAYS", 480.0, 10, "", False),
-        ],
-    ),
-]
-
-CATALOG_PRODUCTS = [
-    (
-        pname,
-        cat_key,
-        [
-            (
-                canon_duration(dur),
-                round_to_0_or_5(pr) if fixed_off else round_to_zero(pr),
-                stk,
-                bon,
-            )
-            for dur, pr, stk, bon, fixed_off in plist
-        ],
-    )
-    for pname, cat_key, plist in RAW_CATALOG
-]
-
-admin_states = {}
-user_states = {}
+def normalize_bd_mobile(text: str) -> str | None:
+  cleaned = re.sub(r"[\s\-\+]", "", text or "")
+  if cleaned.startswith("880"):
+    cleaned = "0" + cleaned[3:]
+  if re.fullmatch(r"01[3-9]\d{8}", cleaned):
+    return cleaned
+  return None
 
 
-def now_str() -> str:
-  return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+def get_payment_numbers() -> tuple[str, str]:
+  conn = get_conn()
+  cur = conn.cursor()
+  cur.execute("SELECT bkash, nagad FROM payment_settings WHERE id = 1")
+  row = cur.fetchone()
+  conn.close()
+  if not row:
+    return DEFAULT_BKASH, DEFAULT_NAGAD
+  return (row["bkash"] or DEFAULT_BKASH).strip(), (
+      row["nagad"] or DEFAULT_NAGAD
+  ).strip()
 
 
-def get_conn() -> sqlite3.Connection:
-  db_dir = os.path.dirname(os.path.abspath(DB_PATH))
-  if db_dir and not os.path.exists(db_dir):
-    os.makedirs(db_dir, exist_ok=True)
-  conn = sqlite3.connect(DB_PATH, timeout=30.0)
-  conn.row_factory = sqlite3.Row
-  conn.execute("PRAGMA journal_mode=WAL;")
-  conn.execute("PRAGMA synchronous=NORMAL;")
-  return conn
-
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
-
-
-def update_channel_kb() -> InlineKeyboardMarkup:
-  return InlineKeyboardMarkup(inline_keyboard=[[
-      InlineKeyboardButton(text="JOIN UPDATE CHANNEL 🗣️", url=CHANNEL_URL),
-  ]])
-
-
-async def safe_delete_message(chat_id: int, message_id: int | None):
-  if not message_id:
-    return
-  try:
-    await bot.delete_message(chat_id=chat_id, message_id=message_id)
-  except Exception:
-    pass
-
-
-async def safe_delete_messages(chat_id: int, message_ids: list[int | None]):
-  for mid in message_ids:
-    await safe_delete_message(chat_id, mid)
+def update_payment_number(method: str, number: str):
+  conn = get_conn()
+  cur = conn.cursor()
+  if method == "bkash":
+    cur.execute("UPDATE payment_settings SET bkash = ? WHERE id = 1", (number,))
+  elif method == "nagad":
+    cur.execute("UPDATE payment_settings SET nagad = ? WHERE id = 1", (number,))
+  conn.commit()
+  conn.close()
 
 
 def detect_payment_method_label(
-    sender_number: str = "", trx_id: str = "", proof_photo_id: str = ""
+    sender_number: str = "",
+    trx_id: str = "",
+    proof_photo_id: str = "",
+    selected_channel: str = "",
 ) -> str:
+  ch = (selected_channel or "").strip().lower()
   num = normalize_bd_mobile(sender_number or "") or (sender_number or "").strip()
   trx = (trx_id or "").strip().upper()
   has_photo = bool((proof_photo_id or "").strip())
 
+  bkash_num, nagad_num = get_payment_numbers()
+  norm_bk = normalize_bd_mobile(bkash_num) or bkash_num
+  norm_ng = normalize_bd_mobile(nagad_num) or nagad_num
+
+  if ch == "bkash":
+    if num:
+      return f"🅱️ বিকাশে টাকা পাঠানো হয়েছে ({num})"
+    if trx:
+      return f"🅱️ বিকাশে টাকা পাঠানো হয়েছে (TrxID: {trx})"
+    if has_photo:
+      return "🅱️ বিকাশে টাকা পাঠানো হয়েছে (স্ক্রিনশট)"
+    return "🅱️ বিকাশে টাকা পাঠানো হয়েছে"
+
+  if ch == "nagad":
+    if num:
+      return f"🅽 নগদে টাকা পাঠানো হয়েছে ({num})"
+    if trx:
+      return f"🅽 নগদে টাকা পাঠানো হয়েছে (TrxID: {trx})"
+    if has_photo:
+      return "🅽 নগদে টাকা পাঠানো হয়েছে (স্ক্রিনশট)"
+    return "🅽 নগদে টাকা পাঠানো হয়েছে"
+
+  if num and norm_bk and num == norm_bk:
+    return f"🅱️ বিকাশে টাকা পাঠানো হয়েছে ({num})"
+  if num and norm_ng and num == norm_ng:
+    return f"🅽 নগদে টাকা পাঠানো হয়েছে ({num})"
+
   if trx:
     if trx.startswith("BK") or "BKASH" in trx:
-      return f"বিকাশ (TrxID: {trx})"
+      return f"🅱️ বিকাশে টাকা পাঠানো হয়েছে (TrxID: {trx})"
     if trx.startswith("NG") or "NAGAD" in trx:
-      return f"নগদ (TrxID: {trx})"
+      return f"🅽 নগদে টাকা পাঠানো হয়েছে (TrxID: {trx})"
     return f"TrxID ({trx})"
 
   if num:
-    if re.fullmatch(r"01[3-9]\d{8}", num):
-      prefix3 = num[:3]
-      if prefix3 in ("017", "013"):
-        return f"বিকাশ / নগদ নম্বর ({num})"
-      if prefix3 in ("018", "019", "016", "014", "015"):
-        return f"মোবাইল নম্বর ({num})"
     return f"মোবাইল নম্বর ({num})"
 
   if has_photo:
@@ -421,13 +363,12 @@ def detect_payment_method_label(
 
 
 # ==========================================
-# HIGH-RELIABILITY BACKUP & RESTORE ENGINE
+# BACKUP & RESTORE ENGINE
 # ==========================================
 def export_full_backup_payload() -> dict:
   conn = get_conn()
   try:
     cur = conn.cursor()
-
     cur.execute("SELECT * FROM users ORDER BY user_id")
     users = [dict(r) for r in cur.fetchall()]
 
@@ -448,7 +389,7 @@ def export_full_backup_payload() -> dict:
     key_ownership = [dict(r) for r in cur.fetchall()]
 
     return {
-        "version": "zoro404_backup_v3_pro",
+        "version": "zoro404_backup_v5_fixed",
         "exported_at": now_str(),
         "counts": {
             "users": len(users),
@@ -1003,13 +944,6 @@ async def dolphin_reset_hwid_api(
         else "❌ Password is incorrect or not found. Try again with a valid password.",
     )
 
-  except asyncio.TimeoutError:
-    return (
-        False,
-        "❌ পাসওয়ার্ডটি ভুল বা খুঁজে পাওয়া যায়নি। সঠিক পাসওয়ার্ড দিয়ে আবার চেষ্টা করুন।"
-        if lang == "bn"
-        else "❌ Password is incorrect or not found. Try again with a valid password.",
-    )
   except Exception as exc:
     logger.warning("Dolphin reset API error: %s", exc)
     return (
@@ -1137,19 +1071,6 @@ def build_approved_order_message(
   )
 
 
-def normalize_bd_mobile(text: str) -> str | None:
-  cleaned = re.sub(r"[\s\-\+]", "", text or "")
-  if cleaned.startswith("880"):
-    cleaned = "0" + cleaned[3:]
-  if re.fullmatch(r"01[3-9]\d{8}", cleaned):
-    return cleaned
-  return None
-
-
-def is_valid_bd_mobile(text: str) -> bool:
-  return normalize_bd_mobile(text) is not None
-
-
 def is_valid_trx_or_proof_text(text: str) -> tuple[bool, str, bool]:
   raw = (text or "").strip()
   if not raw:
@@ -1213,92 +1134,42 @@ def is_duplicate_proof(proof_val: str, is_mobile: bool = False) -> bool:
 
 
 def sync_catalog_prices(cur: sqlite3.Cursor):
-  removed_canon = {canon_name(x) for x in REMOVED_PRODUCTS}
-  catalog_map = {
-      canon_name(pname): (pname, cat_key, plist)
-      for pname, cat_key, plist in CATALOG_PRODUCTS
-  }
-
-  cur.execute("SELECT id, name, category FROM products ORDER BY id")
-  all_prods = cur.fetchall()
-
-  kept_by_canon = {}
-  for prow in all_prods:
-    pid = prow["id"]
-    cname = canon_name(prow["name"])
-    if cname in removed_canon:
-      cur.execute("DELETE FROM plans WHERE product_id = ?", (pid,))
-      cur.execute("DELETE FROM products WHERE id = ?", (pid,))
+  for item in CATALOG_PRODUCTS:
+    if not isinstance(item, (list, tuple)) or len(item) < 3:
       continue
-
-    if cname in catalog_map:
-      target_pname, target_cat, _ = catalog_map[cname]
-      if cname not in kept_by_canon:
-        kept_by_canon[cname] = pid
-        if prow["name"] != target_pname or prow["category"] != target_cat:
-          cur.execute(
-              "UPDATE products SET name = ?, category = ? WHERE id = ?",
-              (target_pname, target_cat, pid),
-          )
-      else:
-        primary_pid = kept_by_canon[cname]
-        cur.execute(
-            "UPDATE orders SET plan_id = (SELECT id FROM plans WHERE product_id"
-            " = ? LIMIT 1) WHERE plan_id IN (SELECT id FROM plans WHERE"
-            " product_id = ?)",
-            (primary_pid, pid),
-        )
-        cur.execute("DELETE FROM plans WHERE product_id = ?", (pid,))
-        cur.execute("DELETE FROM products WHERE id = ?", (pid,))
-
-  for cname, (pname, cat_key, plist) in catalog_map.items():
-    if cname not in kept_by_canon:
+    pname, cat_key, plist = item[0], item[1], item[2]
+    cur.execute(
+        "SELECT id FROM products WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT"
+        " 1",
+        (pname,),
+    )
+    prow = cur.fetchone()
+    if prow:
+      pid = prow["id"]
+    else:
       cur.execute(
           "INSERT INTO products (name, category) VALUES (?, ?)",
           (pname, cat_key),
       )
       pid = cur.lastrowid
-      kept_by_canon[cname] = pid
-    else:
-      pid = kept_by_canon[cname]
 
-    allowed_durs = [canon_duration(dur) for dur, _, _, _ in plist]
-    cur.execute(
-        "SELECT id, duration, bonus FROM plans WHERE product_id = ? ORDER BY id",
-        (pid,),
-    )
-    existing_plans = cur.fetchall()
-
-    seen_durs = set()
-    for pl in existing_plans:
-      cdur = canon_duration(pl["duration"])
-      if cdur not in allowed_durs or cdur in seen_durs:
-        cur.execute("DELETE FROM plans WHERE id = ?", (pl["id"],))
-      else:
-        seen_durs.add(cdur)
-        if pl["duration"] != cdur:
-          cur.execute(
-              "UPDATE plans SET duration = ? WHERE id = ?", (cdur, pl["id"])
-          )
-
-    for dur, pr, st, bon in plist:
-      cdur = canon_duration(dur)
+    for pitem in plist:
+      if not isinstance(pitem, (list, tuple)) or len(pitem) < 2:
+        continue
+      dur = canon_duration(pitem[0])
+      pr = float(pitem[1])
+      stk = int(pitem[2]) if len(pitem) > 2 else 20
+      bon = str(pitem[3]) if len(pitem) > 3 else ""
       cur.execute(
-          "SELECT id FROM plans WHERE product_id = ? AND duration = ? ORDER BY"
-          " id LIMIT 1",
-          (pid, cdur),
+          "SELECT id FROM plans WHERE product_id = ? AND duration = ? LIMIT 1",
+          (pid, dur),
       )
-      pl_row = cur.fetchone()
-      if pl_row:
-        cur.execute(
-            "UPDATE plans SET price = ? WHERE id = ?",
-            (pr, pl_row["id"]),
-        )
-      else:
+      plrow = cur.fetchone()
+      if not plrow:
         cur.execute(
             "INSERT INTO plans (product_id, duration, price, stock, bonus)"
             " VALUES (?, ?, ?, ?, ?)",
-            (pid, cdur, pr, st, bon),
+            (pid, dur, pr, stk, bon),
         )
 
 
@@ -1437,28 +1308,6 @@ def init_db():
 
   sync_catalog_prices(cur)
 
-  conn.commit()
-  conn.close()
-
-
-def get_payment_numbers():
-  conn = get_conn()
-  cur = conn.cursor()
-  cur.execute("SELECT bkash, nagad FROM payment_settings WHERE id = 1")
-  row = cur.fetchone()
-  conn.close()
-  if not row:
-    return DEFAULT_BKASH, DEFAULT_NAGAD
-  return row["bkash"] or "N/A", row["nagad"] or "N/A"
-
-
-def update_payment_number(method: str, number: str):
-  conn = get_conn()
-  cur = conn.cursor()
-  if method == "bkash":
-    cur.execute("UPDATE payment_settings SET bkash = ? WHERE id = 1", (number,))
-  elif method == "nagad":
-    cur.execute("UPDATE payment_settings SET nagad = ? WHERE id = 1", (number,))
   conn.commit()
   conn.close()
 
@@ -1606,16 +1455,50 @@ def status_label(status: str, lang: str) -> str:
   bn_map = {
       "pending_payment": "পেমেন্ট বাকি",
       "pending": "ভেরিফিকেশন চলছে",
-      "approved": "এপ্রুভড",
+      "approved": "অ্যাক্টিভ / এপ্রুভড",
       "rejected": "রিজেক্টেড",
   }
   en_map = {
       "pending_payment": "Awaiting Proof",
       "pending": "Pending Review",
-      "approved": "Approved",
+      "approved": "Active / Approved",
       "rejected": "Rejected",
   }
   return (bn_map if lang == "bn" else en_map).get(status, status)
+
+
+def payment_method_pick_kb(oid: int) -> InlineKeyboardMarkup:
+  return InlineKeyboardMarkup(
+      inline_keyboard=[
+          [
+              InlineKeyboardButton(
+                  text="🅱️ বিকাশ", callback_data=f"paych_{oid}_bkash"
+              ),
+              InlineKeyboardButton(
+                  text="🅽 নগদ", callback_data=f"paych_{oid}_nagad"
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="🚀 রকেট (বন্ধ)", callback_data="paych_disabled_rocket"
+              ),
+              InlineKeyboardButton(
+                  text="🟣 উপায় (বন্ধ)", callback_data="paych_disabled_upay"
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="🟡 Binance (Closed)",
+                  callback_data="paych_disabled_binance",
+              ),
+          ],
+          [
+              InlineKeyboardButton(
+                  text="❌ অর্ডার বাতিল করুন", callback_data=f"cancelord_{oid}"
+              ),
+          ],
+      ]
+  )
 
 
 def cancel_order_kb(oid: int, lang: str = "bn") -> InlineKeyboardMarkup:
@@ -1872,10 +1755,10 @@ def payment_numbers_kb() -> InlineKeyboardMarkup:
   return InlineKeyboardMarkup(
       inline_keyboard=[[
           InlineKeyboardButton(
-              text="📱 Set bKash", callback_data="setpay_bkash"
+              text="🅱️ Set বিকাশ", callback_data="setpay_bkash"
           ),
           InlineKeyboardButton(
-              text="📱 Set Nagad", callback_data="setpay_nagad"
+              text="🅽 Set নগদ", callback_data="setpay_nagad"
           ),
       ]]
   )
@@ -2505,9 +2388,7 @@ async def cb_select_plan(callback: CallbackQuery):
       pname, duration, base_price, 0.0, total_spent
   )
 
-  bkash_num, nagad_num = get_payment_numbers()
   created = now_str()
-
   cur.execute(
       """
         INSERT INTO orders (
@@ -2522,43 +2403,26 @@ async def cb_select_plan(callback: CallbackQuery):
   conn.close()
 
   bonus_line = f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
-  if lang == "bn":
-    msg = (
-        f"🛒 <b>অর্ডার #{oid}</b>\n"
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"📦 <b>প্রোডাক্ট:</b> {html.escape(pname)}\n"
-        f"⏱ <b>সময় / মেয়াদ:</b> {html.escape(duration)}{bonus_line}\n"
-        f"💵 <b>মোট টাকা:</b> <b>৳{final_price:.0f}</b> (Send Money)\n\n"
-        f"📲 <b>পেমেন্ট নম্বর (ক্লিক করে কপি করুন):</b>\n"
-        f"• <b>বিকাশ:</b> <code>{html.escape(bkash_num)}</code>\n"
-        f"• <b>নগদ:</b> <code>{html.escape(nagad_num)}</code>\n\n"
-        f"টাকা পাঠানোর পর যেকোনো ১টি দিন:\n"
-        f"📸 <b>পেমেন্টের স্ক্রিনশট</b>\n"
-        f"অথবা\n"
-        f"✍️ <b>সঠিক TrxID / ১১ ডিজিটের মোবাইল নম্বর</b>"
-    )
-  else:
-    msg = (
-        f"🛒 <b>ORDER #{oid}</b>\n"
-        f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-        f"📦 <b>PRODUCT:</b> {html.escape(pname)}\n"
-        f"⏱ <b>DURATION:</b> {html.escape(duration)}{bonus_line}\n"
-        f"💵 <b>TOTAL AMOUNT:</b> <b>৳{final_price:.0f}</b> (Send Money)\n\n"
-        f"📲 <b>PAYMENT NUMBERS (Tap to copy):</b>\n"
-        f"• <b>bKash:</b> <code>{html.escape(bkash_num)}</code>\n"
-        f"• <b>Nagad:</b> <code>{html.escape(nagad_num)}</code>\n\n"
-        f"After sending money, send any ONE:\n"
-        f"📸 <b>Payment screenshot</b>\n"
-        f"OR\n"
-        f"✍️ <b>Valid TrxID / 11-digit mobile number</b>"
-    )
+  msg = (
+      f"🛒 <b>অর্ডার #{oid}</b>\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      f"📦 <b>প্রোডাক্ট:</b> {html.escape(pname)}\n"
+      f"⏱ <b>সময় / মেয়াদ:</b> {html.escape(duration)}{bonus_line}\n"
+      f"💵 <b>মোট টাকা:</b> <b>৳{final_price:.0f}</b>\n\n"
+      f"💳 <b>পেমেন্ট মাধ্যম বেছে নিন:</b>\n"
+      f"• 🅱️ <b>বিকাশ</b> (খোলা)\n"
+      f"• 🅽 <b>নগদ</b> (খোলা)\n"
+      f"• 🚀 রকেট — <i>আপাতত বন্ধ</i>\n"
+      f"• 🟣 উপায় — <i>আপাতত বন্ধ</i>\n"
+      f"• 🟡 Binance — <i>Currently closed</i>"
+  )
 
   await callback.message.edit_text(
-      msg, parse_mode="HTML", reply_markup=cancel_order_kb(oid, lang)
+      msg, parse_mode="HTML", reply_markup=payment_method_pick_kb(oid)
   )
 
   user_states[uid] = {
-      "step": "wait_proof",
+      "step": "wait_payment_channel",
       "order_id": oid,
       "order_msg_id": callback.message.message_id,
       "plan_id": plid,
@@ -2570,6 +2434,86 @@ async def cb_select_plan(callback: CallbackQuery):
       "final_price": final_price,
       "bonus": bonus,
       "created_at": created,
+  }
+  await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("paych_disabled_"))
+async def cb_paych_disabled(callback: CallbackQuery):
+  ch_code = callback.data.split("_", 2)[2]
+  if ch_code == "binance":
+    await callback.answer(
+        "Binance is currently closed. Please select বিকাশ or নগদ.",
+        show_alert=True,
+    )
+  elif ch_code == "rocket":
+    await callback.answer(
+        "রকেট পেমেন্ট আপাতত বন্ধ আছে। বিকাশ বা নগদ সিলেক্ট করুন।",
+        show_alert=True,
+    )
+  else:
+    await callback.answer(
+        "উপায় পেমেন্ট আপাতত বন্ধ আছে। বিকাশ বা নগদ সিলেক্ট করুন।",
+        show_alert=True,
+    )
+
+
+@dp.callback_query(F.data.startswith("paych_"))
+async def cb_select_payment_channel(callback: CallbackQuery):
+  parts = callback.data.split("_", 2)
+  if len(parts) < 3:
+    await callback.answer()
+    return
+  oid = int(parts[1])
+  ch = parts[2]
+  if ch not in ("bkash", "nagad"):
+    await callback.answer()
+    return
+
+  uid = callback.from_user.id
+  _, _, lang, _, _, _ = get_user_info(uid)
+  bkash_num, nagad_num = get_payment_numbers()
+
+  ustate = user_states.get(uid) or {}
+  pname = ustate.get("pname") or "PANEL"
+  duration = ustate.get("duration") or ""
+  final_price = float(ustate.get("final_price") or 0.0)
+  bonus = ustate.get("bonus") or ""
+
+  if ch == "bkash":
+    ch_badge = "🅱️ <b>বিকাশ</b>"
+    target_num = bkash_num
+    send_note = "বিকাশে Send Money করুন"
+  else:
+    ch_badge = "🅽 <b>নগদ</b>"
+    target_num = nagad_num
+    send_note = "নগদে Send Money করুন"
+
+  bonus_line = f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
+  msg = (
+      f"🛒 <b>অর্ডার #{oid}</b> — {ch_badge}\n"
+      f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+      f"📦 <b>প্রোডাক্ট:</b> {html.escape(pname)}\n"
+      f"⏱ <b>সময় / মেয়াদ:</b> {html.escape(duration)}{bonus_line}\n"
+      f"💵 <b>মোট টাকা:</b> <b>৳{final_price:.0f}</b> ({send_note})\n\n"
+      f"📲 {ch_badge} <b>নম্বর (ক্লিক করে কপি করুন):</b>\n"
+      f"<code>{html.escape(target_num)}</code>\n\n"
+      f"টাকা পাঠানোর পর যেকোনো ১টি দিন:\n"
+      f"📸 <b>পেমেন্টের স্ক্রিনশট</b>\n"
+      f"অথবা\n"
+      f"✍️ <b>সঠিক TrxID / ১১ ডিজিটের মোবাইল নম্বর</b>"
+  )
+
+  await callback.message.edit_text(
+      msg, parse_mode="HTML", reply_markup=cancel_order_kb(oid, lang)
+  )
+
+  user_states[uid] = {
+      **ustate,
+      "step": "wait_proof",
+      "order_id": oid,
+      "order_msg_id": callback.message.message_id,
+      "payment_channel": ch,
   }
   await callback.answer()
 
@@ -2629,7 +2573,9 @@ async def btn_my_orders(message: Message):
 
   if not rows:
     await message.answer(
-        "<b>আপনার কোনো অর্ডার নেই।</b>" if lang == "bn" else "<b>No orders yet.</b>",
+        "<b>আপনার কোনো অর্ডার নেই।</b>"
+        if lang == "bn"
+        else "<b>No orders yet.</b>",
         parse_mode="HTML",
     )
     return
@@ -2843,6 +2789,7 @@ async def btn_admin_panel(message: Message):
 @dp.callback_query(F.data == "back_adm_panel")
 async def cb_back_adm_panel(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   await safe_delete_message(callback.message.chat.id, callback.message.message_id)
   await send_admin_panel_to_chat(callback.message.chat.id)
@@ -2852,6 +2799,7 @@ async def cb_back_adm_panel(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_backup")
 async def cb_adm_backup(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   await callback.answer("ব্যাকআপ তৈরি হচ্ছে...")
   await send_backup_file_to_admin(ADMIN_ID)
@@ -2860,6 +2808,7 @@ async def cb_adm_backup(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_restore")
 async def cb_adm_restore(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   prompt = await callback.message.answer(
       "♻️ <b>PRO RESTORE DATABASE</b>\n"
@@ -2876,6 +2825,7 @@ async def cb_adm_restore(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_report")
 async def cb_adm_report(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
 
   conn = get_conn()
@@ -2908,12 +2858,13 @@ async def cb_adm_report(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_paynums")
 async def cb_adm_paynums(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   bkash_num, nagad_num = get_payment_numbers()
   await callback.message.answer(
       f"💳 <b>বর্তমান পেমেন্ট নম্বর:</b>\n"
-      f"• <b>বিকাশ:</b> <code>{html.escape(bkash_num)}</code>\n"
-      f"• <b>নগদ:</b> <code>{html.escape(nagad_num)}</code>\n\n"
+      f"• 🅱️ <b>বিকাশ:</b> <code>{html.escape(bkash_num)}</code>\n"
+      f"• 🅽 <b>নগদ:</b> <code>{html.escape(nagad_num)}</code>\n\n"
       f"যে নম্বরটি বদলাতে চান নিচের বাটনে চাপুন:",
       parse_mode="HTML",
       reply_markup=payment_numbers_kb(),
@@ -2924,6 +2875,7 @@ async def cb_adm_paynums(callback: CallbackQuery):
 @dp.callback_query(F.data.in_(["setpay_bkash", "setpay_nagad"]))
 async def cb_setpay_method(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   method = "bkash" if callback.data == "setpay_bkash" else "nagad"
   label = "বিকাশ" if method == "bkash" else "নগদ"
@@ -2939,6 +2891,7 @@ async def cb_setpay_method(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_lookup")
 async def cb_adm_lookup(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   prompt = await callback.message.answer(
       "যেকোনো ইউজারের UserID লিখে পাঠান (উদাহরণ: 5882761122):"
@@ -2953,6 +2906,7 @@ async def cb_adm_lookup(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_users")
 async def cb_adm_users(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   conn = get_conn()
   cur = conn.cursor()
@@ -2986,6 +2940,7 @@ async def cb_adm_users(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_broadcast")
 async def cb_adm_broadcast(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   prompt = await callback.message.answer("সব ইউজারকে পাঠানোর মেসেজটি লিখুন:")
   admin_states[callback.from_user.id] = {
@@ -2995,12 +2950,10 @@ async def cb_adm_broadcast(callback: CallbackQuery):
   await callback.answer()
 
 
-# ==========================================
-# EASY PRODUCT & PLAN ADMIN WORKFLOWS
-# ==========================================
 @dp.callback_query(F.data == "adm_addprod")
 async def cb_adm_addprod(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   prompt = await callback.message.answer(
       "➕ <b>নতুন প্রোডাক্ট যোগ করুন</b>\n"
@@ -3017,6 +2970,7 @@ async def cb_adm_addprod(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("pickprodcat_"))
 async def cb_easy_pick_prod_cat(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   cat_val = callback.data.split("_", 1)[1]
   state = admin_states.get(ADMIN_ID) or {}
@@ -3056,6 +3010,7 @@ async def cb_easy_pick_prod_cat(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_delprod")
 async def cb_adm_delprod(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   conn = get_conn()
   cur = conn.cursor()
@@ -3087,6 +3042,7 @@ async def cb_adm_delprod(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("easydelprod_"))
 async def cb_easy_delprod(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   pid = int(callback.data.split("_", 1)[1])
   conn = get_conn()
@@ -3112,6 +3068,7 @@ async def cb_easy_delprod(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_addplan")
 async def cb_adm_addplan(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   conn = get_conn()
   cur = conn.cursor()
@@ -3143,6 +3100,7 @@ async def cb_adm_addplan(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("easyplanprod_"))
 async def cb_easy_plan_prod(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   pid = int(callback.data.split("_", 1)[1])
   conn = get_conn()
@@ -3173,6 +3131,7 @@ async def cb_easy_plan_prod(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("pickunit_"))
 async def cb_pick_duration_unit(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   unit_type = callback.data.split("_", 1)[1]
   state = admin_states.get(ADMIN_ID) or {}
@@ -3208,6 +3167,7 @@ async def cb_pick_duration_unit(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_delplan")
 async def cb_adm_delplan(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   conn = get_conn()
   cur = conn.cursor()
@@ -3246,6 +3206,7 @@ async def cb_adm_delplan(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("easydelplan_"))
 async def cb_easy_delplan(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   plid = int(callback.data.split("_", 1)[1])
   conn = get_conn()
@@ -3278,6 +3239,7 @@ async def cb_easy_delplan(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_editplan")
 async def cb_adm_editplan(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   conn = get_conn()
   cur = conn.cursor()
@@ -3316,6 +3278,7 @@ async def cb_adm_editplan(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("easyeditplan_"))
 async def cb_easy_editplan_pick(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   plid = int(callback.data.split("_", 1)[1])
   conn = get_conn()
@@ -3352,6 +3315,7 @@ async def cb_easy_editplan_pick(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_setoffer")
 async def cb_adm_setoffer(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   conn = get_conn()
   cur = conn.cursor()
@@ -3390,6 +3354,7 @@ async def cb_adm_setoffer(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("easyofferplan_"))
 async def cb_easy_offer_pick(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   plid = int(callback.data.split("_", 1)[1])
   conn = get_conn()
@@ -3426,6 +3391,7 @@ async def cb_easy_offer_pick(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_orders")
 async def cb_adm_orders(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   conn = get_conn()
   cur = conn.cursor()
@@ -3486,6 +3452,7 @@ async def cb_adm_orders(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("reqapp_"))
 async def cb_req_approve_with_key(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   oid = int(callback.data.split("_", 1)[1])
   prompt = await callback.message.answer(
@@ -3503,6 +3470,7 @@ async def cb_req_approve_with_key(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("rej_"))
 async def cb_order_reject(callback: CallbackQuery):
   if callback.from_user.id != ADMIN_ID:
+    await callback.answer()
     return
   oid = int(callback.data.split("_", 1)[1])
 
@@ -3835,6 +3803,21 @@ async def handle_messages(message: Message):
       sp = max(float(urow["total_spent"] or 0.0), calc_spent)
       vp = get_vip_discount_pct(sp)
 
+      generated_keys = []
+      for o in approved_ords:
+        kval = (o["delivered_key"] or "").strip()
+        if kval:
+          generated_keys.append(
+              f"  🟢 [অ্যাক্টিভ] <code>{html.escape(kval)}</code> —"
+              f" <b>{html.escape(o['pname'])}</b> ({html.escape(o['duration'])})"
+          )
+
+      keys_section = (
+          "\n".join(generated_keys)
+          if generated_keys
+          else "  • কোনো অ্যাক্টিভ / জেনারেটেড পাসওয়ার্ড নেই।"
+      )
+
       order_cards = []
       for o in all_ords[:10]:
         amt = float(o["final_amount"] or o["price"] or 0.0)
@@ -3843,7 +3826,7 @@ async def handle_messages(message: Message):
         )
         st_bn = status_label(o["status"], "bn")
         key_line = (
-            f"\n     🔑 <b>Key:</b> <code>{html.escape(o['delivered_key'])}</code>"
+            f"\n     🔑 <b>Key/Pass:</b> <code>{html.escape(o['delivered_key'])}</code>"
             if o["delivered_key"]
             else ""
         )
@@ -3869,9 +3852,11 @@ async def handle_messages(message: Message):
           f"🆔 <b>User ID:</b> <code>{target_uid}</code>\n"
           f"📅 <b>জয়েন:</b> <code>{html.escape(urow['joined_at'])}</code>\n"
           f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
-          f"🔑 <b>মোট কেনা পাসওয়ার্ড/অর্ডার:</b> <b>{len(approved_ords)} টি</b> (মোট রিকোয়েস্ট: {len(all_ords)} টি)\n"
+          f"🔑 <b>জেনারেটেড ও অ্যাক্টিভ পাসওয়ার্ড:</b> <b>{len(generated_keys)} টি</b> (অর্ডার: {len(approved_ords)} টি)\n"
           f"💰 <b>মোট খরচ:</b> <b>৳{sp:.0f}</b> | 👑 <b>VIP:</b> {vp:.0f}%\n"
           f"⏳ <b>পেন্ডিং:</b> {len(pending_ords)} | ❌ <b>রিজেক্টেড:</b> {len(rejected_ords)}\n"
+          f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
+          f"🔐 <b>অ্যাক্টিভ পাসওয়ার্ডসমূহ:</b>\n{keys_section}\n"
           f"▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬\n"
           f"🧾 <b>অর্ডার ডিটেইলস:</b>\n{orders_section}",
           parse_mode="HTML",
@@ -3979,6 +3964,16 @@ async def handle_messages(message: Message):
       )
       return
 
+    if step == "wait_payment_channel":
+      oid = ustate.get("order_id")
+      if oid:
+        await message.answer(
+            "👆 <b>আগে নিচের বাটন থেকে বিকাশ বা নগদ সিলেক্ট করুন।</b>",
+            parse_mode="HTML",
+            reply_markup=payment_method_pick_kb(int(oid)),
+        )
+      return
+
     if step == "wait_proof":
       has_photo = bool(message.photo)
       valid_txt, cleaned_proof, is_mobile = is_valid_trx_or_proof_text(txt)
@@ -4031,6 +4026,7 @@ async def handle_messages(message: Message):
       disc_pct = float(ustate.get("discount_pct", 0.0))
       bonus = ustate.get("bonus", "")
       created = ustate.get("created_at", now_str())
+      selected_ch = ustate.get("payment_channel", "")
 
       photo_id = message.photo[-1].file_id if has_photo else ""
       sender_num_val = cleaned_proof if (valid_txt and is_mobile) else ""
@@ -4061,7 +4057,7 @@ async def handle_messages(message: Message):
 
       full_name, username, _, total_spent, _, _ = get_user_info(uid)
       pay_method_lbl = detect_payment_method_label(
-          sender_num_val, trx_val, photo_id
+          sender_num_val, trx_val, photo_id, selected_channel=selected_ch
       )
       offer_line = (
           f"\n🎁 <b>অফার:</b> {html.escape(bonus)}" if bonus else ""
